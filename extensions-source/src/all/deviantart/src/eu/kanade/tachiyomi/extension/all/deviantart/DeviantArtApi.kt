@@ -354,7 +354,7 @@ class DeviantArtApi(
                     val rawSrc = btn.selectFirst("img")?.absUrl("src") ?: return@mapNotNull null
                     if (isArtworkUrl(rawSrc)) rawSrc else null
                 }
-                if (urls.size > 1) return urls
+                if (urls.size > 1) return urls.map { ImageSelector.maximizeRendition(it) }
             }
         }
 
@@ -364,7 +364,7 @@ class DeviantArtApi(
                 val rawSrc = img.absUrl("src")
                 if (isArtworkUrl(rawSrc)) rawSrc else null
             }
-            if (urls.size > 1) return urls
+            if (urls.size > 1) return urls.map { ImageSelector.maximizeRendition(it) }
         }
 
         // 3. Single image candidate collection
@@ -434,11 +434,13 @@ class DeviantArtApi(
         )
 
         if (selected != null) {
-            return listOf(selected.url)
+            return listOf(ImageSelector.maximizeRendition(selected.url))
         }
 
         // 4. Last resort: oEmbed lookup
-        resolveOembedImage(fullUrl)?.takeIf { isArtworkUrl(it) }?.let { return listOf(it) }
+        resolveOembedImage(fullUrl)?.takeIf { isArtworkUrl(it) }?.let {
+            return listOf(ImageSelector.maximizeRendition(it))
+        }
 
         if (isLiterature) {
             throw IOException("This deviation is a text/literature post and cannot be viewed as an image")

@@ -94,16 +94,58 @@ object ImageSelector {
     }
 
     /**
-     * Guarded quality upgrade: replaces `q_<num>` with `q_100` only in transform segment.
-     * Leaves width, height, and tokens completely untouched (FR-16 item 3).
+     * Guarded quality upgrade: upgrades `q_<num>` to `q_100` and maximizes dimensions
+     * within the token's authorized constraints without invalidating the signed JWT (FR-16).
      */
     fun upgradeRendition(url: String): String? {
-        val qRegex = Regex("""([/,])q_([0-9]+)([/,])""")
-        val match = qRegex.find(url) ?: return null
-        val prefix = match.groupValues[1]
-        val currentQ = match.groupValues[2].toIntOrNull() ?: return null
-        if (currentQ >= 100) return null
+        var modified = false
+        var result = url
 
-        return url.replaceFirst(match.value, "${prefix}q_100${match.groupValues[3]}")
+        // 1. Upgrade quality to q_100
+        val qRegex = Regex("""([/,])q_([0-9]+)([/,])""")
+        val qMatch = qRegex.find(result)
+        if (qMatch != null) {
+            val prefix = qMatch.groupValues[1]
+            val currentQ = qMatch.groupValues[2].toIntOrNull() ?: 70
+            if (currentQ < 100) {
+                result = result.replaceFirst(qMatch.value, "${prefix}q_100${qMatch.groupValues[3]}")
+                modified = true
+            }
+        }
+
+        // 2. Upgrade dimensions if Wix token constraints permit
+        if (result.contains("token=") && result.contains("/v1/")) {
+            try {
+                val tokenPart = result.substringAfter("token=").substringBefore("&")
+                val segments = tokenPart.split('.')
+                if (segments.size >= 2) {
+                    val rawPayload = segments[1]
+                    val padded = rawPayload + "=".repeat((4 - rawPayload.length % 4) % 4)
+                    val decoded = String(java.util.Base64.getUrlDecoder().decode(padded))
+                    val widthMatch = Regex(""""width"\s*:\s*"<=?(\d+)"""").find(decoded)
+                    val heightMatch = Regex(""""height"\s*:\s*"<=?(\d+)"""").find(decoded)
+                    val maxW = widthMatch?.groupValues?.get(1)?.toIntOrNull()
+                    val maxH = heightMatch?.groupValues?.get(1)?.toIntOrNull()
+
+                    val curW = Regex("""w_(\d+)""").find(result)?.groupValues?.get(1)?.toIntOrNull()
+                    val curH = Regex("""h_(\d+)""").find(result)?.groupValues?.get(1)?.toIntOrNull()
+
+                    if (maxW != null && curW != null && maxW > curW) {
+                        result = result.replaceFirst("w_$curW", "w_$maxW")
+                        modified = true
+                    }
+                    if (maxH != null && curH != null && maxH > curH) {
+                        result = result.replaceFirst("h_$curH", "h_$maxH")
+                        modified = true
+                    }
+                }
+            } catch (_: Throwable) {
+                // Keep safe unmodified URL on decode exception
+            }
+        }
+
+        return if (modified) result else null
     }
+
+    fun maximizeRendition(url: String): String = upgradeRendition(url) ?: url
 }
