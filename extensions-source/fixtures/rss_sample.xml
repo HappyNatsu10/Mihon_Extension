@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0" xmlns:media="http://search.yahoo.com/mrss/" xmlns:atom="http://www.w3.org/2005/Atom">
+    <channel>
+        <title>DeviantArt: rossdraws's gallery</title>
+        <link>https://www.deviantart.com</link>
+        <description>DeviantArt RSS for rossdraws's gallery</description>
+        <atom:link type="application/rss+xml" rel="self" href="https://backend.deviantart.com/rss.xml?type=deviation&amp;q=gallery%3Arossdraws" />
+        <atom:link rel="next" href="https://backend.deviantart.com/rss.xml?type=deviation&amp;q=gallery%3Arossdraws&amp;offset=60" />
+        <item>
+            <title>LAST CHANCE Shop Event !</title>
+            <link>https://www.deviantart.com/rossdraws/art/LAST-CHANCE-Shop-Event-%21-996651315</link>
+            <guid isPermaLink="true">https://www.deviantart.com/rossdraws/art/LAST-CHANCE-Shop-Event-%21-996651315</guid>
+            <pubDate>Thu, 23 Nov 2023 10:24:50 PST</pubDate>
+            <media:title type="plain">LAST CHANCE Shop Event !</media:title>
+            <media:rating>nonadult</media:rating>
+            <media:credit role="author" scheme="urn:ebu">rossdraws</media:credit>
+            <media:content url="https://images-wixmp-ed30a86b8c4ca887773594c2.wixmp.com/f/b013e38f-b1f0-4193-8d90-acfeae93d61a/dghdp2r-f8522a00-c7cd-4fa9-a5ab-734f42c466d0.jpg/v1/fill/w_1095,h_730,q_70,strp/last_chance_shop_event__by_rossdraws_dghdp2r-pre.jpg?token=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9" height="730" width="1095" medium="image"/>
+        </item>
+        <item>
+            <title>NIMA FIGURINE!</title>
+            <link>https://www.deviantart.com/rossdraws/art/NIMA-FIGURINE%21-971209639</link>
+            <guid isPermaLink="true">https://www.deviantart.com/rossdraws/art/NIMA-FIGURINE%21-971209639</guid>
+            <pubDate>Mon, 10 Jul 2023 10:59:20 PDT</pubDate>
+            <media:title type="plain">NIMA FIGURINE!</media:title>
+            <media:rating>nonadult</media:rating>
+            <media:credit role="author" scheme="urn:ebu">rossdraws</media:credit>
+            <media:content url="https://images-wixmp-ed30a86b8c4ca887773594c2.wixmp.com/f/b013e38f-b1f0-4193-8d90-acfeae93d61a/dg28e5j-3989d651-50d4-4002-a158-32ca38012369.jpg/v1/fill/w_900,h_888,q_70,strp/nima_figurine__by_rossdraws_dg28e5j-pre.jpg?token=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9" height="888" width="900" medium="image"/>
+        </item>
+    </channel>
+</rss>

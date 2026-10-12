@@ -1,0 +1,28 @@
+{
+  "@context": "https://schema.org",
+  "@graph": [
+    {
+      "@type": "CollectionPage",
+      "@id": "https://www.deviantart.com/rossdraws/gallery",
+      "url": "https://www.deviantart.com/rossdraws/gallery",
+      "name": "rossdraws's Gallery on DeviantArt",
+      "description": "Browse rossdraws's artwork on DeviantArt. 535 works of art across all galleries.",
+      "mainEntity": {
+        "@type": "Collection",
+        "@id": "https://www.deviantart.com/rossdraws/gallery#gallery",
+        "name": "rossdraws's Gallery on DeviantArt",
+        "url": "https://www.deviantart.com/rossdraws/gallery",
+        "numberOfItems": 535,
+        "creator": {
+          "@id": "https://www.deviantart.com/rossdraws#person"
+        }
+      }
+    },
+    {
+      "@type": "Person",
+      "@id": "https://www.deviantart.com/rossdraws#person",
+      "name": "rossdraws",
+      "url": "https://www.deviantart.com/rossdraws"
+    }
+  ]
+}

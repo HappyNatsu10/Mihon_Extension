@@ -1,0 +1,20 @@
+import io.github.keiyoushi.gradle.api.ContentWarning
+
+plugins {
+    alias(kei.plugins.extension)
+}
+
+keiyoushi {
+    name = "Celestial Moon"
+    versionCode = 3
+    contentWarning = ContentWarning.MIXED
+    libVersion = "1.6"
+    theme = "mangathemesia"
+
+    source {
+        lang = "es"
+        baseUrl = "https://celestialmoonscan.es"
+        // ZeistManga -> MangaThemesia
+        versionId = 2
+    }
+}

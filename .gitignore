@@ -1,0 +1,21 @@
+# Gradle build outputs and caches
+.gradle/
+**/build/
+**/bin/
+**/.kotlin/
+
+# IDE files
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+
+# Local configs and properties
+local.properties
+/captures/
+.DS_Store
+Thumbs.db
+
+# Upstream git backup
+**/.git_backup/
