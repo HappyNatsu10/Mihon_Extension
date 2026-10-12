@@ -11,6 +11,13 @@ data class OEmbedDto(
     @SerialName("thumbnail_url") val thumbnailUrl: String? = null,
 )
 
+data class ArtworkDetails(
+    val title: String,
+    val author: String,
+    val description: String? = null,
+    val thumbnailUrl: String? = null,
+)
+
 data class ArtistProfile(
     val username: String,
     val totalDeviations: Int = 0,
@@ -29,7 +36,7 @@ data class CachedItem(
 
 @Serializable
 data class GalleryCacheData(
-    val schemaVersion: Int = 1,
+    val schemaVersion: Int = 2,
     val complete: Boolean,
     val items: List<CachedItem>,
 )

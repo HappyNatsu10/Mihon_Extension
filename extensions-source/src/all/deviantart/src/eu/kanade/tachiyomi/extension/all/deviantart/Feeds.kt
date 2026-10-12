@@ -73,26 +73,33 @@ class Feeds(
             val html = response.body.string()
             val doc = Jsoup.parse(html, watchUrl)
 
-            val seenAuthors = HashSet<String>()
             val mangas = mutableListOf<SManga>()
 
             for (tile in doc.select("a[data-hook=deviation_link]")) {
                 val href = tile.attr("href")
                 val author = href.removePrefix("https://www.deviantart.com/").removePrefix("/").substringBefore("/art/")
-                if (author.isNotEmpty() && !author.contains("/") && seenAuthors.add(author.lowercase())) {
-                    val cover = tile.selectFirst("img")?.absUrl("src")
-                    mangas.add(
-                        SManga.create().apply {
-                            url = "/$author/gallery/all"
-                            title = author
-                            this.author = author
-                            this.artist = author
-                            thumbnail_url = cover
-                            status = SManga.ONGOING
-                            genre = "Gallery"
-                        },
-                    )
+                if (author.isEmpty() || author.contains("/")) continue
+
+                val artworkTitle = tile.attr("aria-label").ifEmpty {
+                    tile.selectFirst("img")?.attr("alt").orEmpty().ifBlank { "Artwork" }
                 }
+                val path = if (href.startsWith("http")) {
+                    href.removePrefix("https://www.deviantart.com")
+                } else {
+                    href
+                }
+                val cover = tile.selectFirst("img")?.absUrl("src")
+                mangas.add(
+                    SManga.create().apply {
+                        url = path
+                        title = artworkTitle
+                        this.author = author
+                        this.artist = author
+                        thumbnail_url = cover
+                        status = SManga.COMPLETED
+                        genre = "Artwork"
+                    },
+                )
             }
             MangasPage(mangas, hasNextPage = mangas.isNotEmpty())
         } catch (e: Exception) {
@@ -120,7 +127,6 @@ class Feeds(
             return MangasPage(emptyList(), false)
         }
 
-        val seenAuthors = HashSet<String>()
         val mangas = mutableListOf<SManga>()
 
         for (item in items) {
@@ -134,8 +140,15 @@ class Feeds(
                     null
                 }
 
-            if (author.isNullOrEmpty() || !seenAuthors.add(author.lowercase())) {
+            if (author.isNullOrEmpty() || link.isEmpty()) {
                 continue
+            }
+
+            val title = item.selectFirst("title")?.text().orEmpty().ifBlank { "Untitled" }
+            val path = if (link.startsWith("http")) {
+                link.removePrefix("https://www.deviantart.com").removePrefix("http://www.deviantart.com")
+            } else {
+                link
             }
 
             val thumbnail = item.getElementsByTag("media:thumbnail").firstOrNull()?.attr("url")
@@ -145,18 +158,22 @@ class Feeds(
 
             mangas.add(
                 SManga.create().apply {
-                    this.url = "/$author/gallery/all"
-                    title = author
+                    this.url = path
+                    this.title = title
                     this.author = author
                     this.artist = author
                     thumbnail_url = thumbnail
-                    status = SManga.ONGOING
-                    genre = "Gallery"
+                    status = SManga.COMPLETED
+                    genre = "Artwork"
                 },
             )
         }
 
-        val nextLink = xml.selectFirst("atom|link[rel=next], [rel=next]")?.attr("href")
+        val nextLink = xml.getElementsByTag("atom:link")
+            .firstOrNull { it.attr("rel") == "next" }
+            ?.attr("href")
+            ?.takeIf { it.isNotBlank() }
+            ?: xml.selectFirst("[rel=next]")?.attr("href")?.takeIf { it.isNotBlank() }
         val hasNext = nextLink != null || items.size >= FEED_PAGE_SIZE
 
         return MangasPage(mangas, hasNextPage = hasNext)

@@ -6,7 +6,7 @@ plugins {
 
 keiyoushi {
     name = "DeviantArt"
-    versionCode = 13
+    versionCode = 14
     contentWarning = ContentWarning.MIXED
     libVersion = "1.6"
 
@@ -19,6 +19,7 @@ keiyoushi {
         host("www.deviantart.com")
         host("deviantart.com")
         path("/..*/gallery/..*")
+        path("/..*/art/..*")
     }
 }
 

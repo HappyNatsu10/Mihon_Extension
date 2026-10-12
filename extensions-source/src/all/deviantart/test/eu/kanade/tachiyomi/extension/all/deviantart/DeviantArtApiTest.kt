@@ -79,4 +79,18 @@ class DeviantArtApiTest {
         val total = api.extractTotalFromHtml(doc)
         assertEquals(26842, total)
     }
+
+    @Test
+    fun testIsArtworkUrl() {
+        val api = DeviantArtApi(OkHttpClient())
+        // True artwork media
+        org.junit.Assert.assertTrue(api.isArtworkUrl("https://images-wixmp-ed30a86b8c4ca887773594c2.wixmp.com/f/abc/test.jpg"))
+        org.junit.Assert.assertTrue(api.isArtworkUrl("https://img00.deviantart.net/fs70/i/2015/012/3/4/sample.png"))
+
+        // False: site placeholders, logos, avatars, download redirects
+        org.junit.Assert.assertFalse(api.isArtworkUrl("https://st.deviantart.net/minish/touch-icons/apple-touch-icon-180.png"))
+        org.junit.Assert.assertFalse(api.isArtworkUrl("https://st.deviantart.net/emoticons/smile.gif"))
+        org.junit.Assert.assertFalse(api.isArtworkUrl("https://www.deviantart.com/download/12345/test.zip"))
+        org.junit.Assert.assertFalse(api.isArtworkUrl("https://a.deviantart.net/avatars/u/s/user.jpg"))
+    }
 }

@@ -70,8 +70,22 @@ abstract class DeviantArt :
     // ============================== Search & URL Resolution ==================
 
     override suspend fun getMangaByUrl(url: HttpUrl): SManga? {
+        if (url.encodedPath.contains("/art/")) {
+            val details = api.fetchArtworkDetails(url.encodedPath)
+            return SManga.create().apply {
+                this.url = url.encodedPath
+                this.title = details.title
+                this.author = details.author
+                this.artist = details.author
+                this.description = details.description
+                this.thumbnail_url = details.thumbnailUrl
+                this.status = SManga.COMPLETED
+                this.genre = "Artwork"
+                this.initialized = true
+            }
+        }
         val resolved = DeviantArtUrl.resolve(url.toString())
-        return resolveToManga(resolved)
+        return resolveToMangas(resolved).firstOrNull()
     }
 
     override suspend fun getSearchMangaList(page: Int, query: String, filters: FilterList): MangasPage {
@@ -98,9 +112,9 @@ abstract class DeviantArt :
         val resolved = DeviantArtUrl.resolve(trimmedQuery)
         if (resolved !is Resolved.Invalid) {
             if (page > 1) return MangasPage(emptyList(), false)
-            val manga = resolveToManga(resolved)
-            if (manga != null) {
-                return MangasPage(listOf(manga), false)
+            val mangas = resolveToMangas(resolved)
+            if (mangas.isNotEmpty()) {
+                return MangasPage(mangas, false)
             }
         }
 
@@ -108,26 +122,76 @@ abstract class DeviantArt :
         return feeds.search(trimmedQuery, page, sortByNewest = isSortNewest)
     }
 
-    private fun resolveToManga(resolved: Resolved): SManga? = when (resolved) {
-        is Resolved.Gallery -> {
-            try {
+    private fun resolveToMangas(resolved: Resolved): List<SManga> = when (resolved) {
+        is Resolved.ArtworkAndGallery -> {
+            val details = api.fetchArtworkDetails(resolved.artworkPath)
+            val artworkManga = SManga.create().apply {
+                url = resolved.artworkPath
+                title = details.title
+                author = details.author.ifBlank { resolved.ref.user }
+                artist = details.author.ifBlank { resolved.ref.user }
+                description = details.description
+                thumbnail_url = details.thumbnailUrl
+                status = SManga.COMPLETED
+                genre = "Artwork"
+                initialized = true
+            }
+
+            val galleryManga = try {
                 val profile = api.fetchArtistProfile(resolved.ref)
                 createMangaFromProfile(profile, resolved.ref)
             } catch (_: Exception) {
                 null
             }
+
+            listOfNotNull(artworkManga, galleryManga)
         }
-        is Resolved.NeedsOembed -> {
-            val author = api.resolveOembed(resolved.url) ?: return null
-            val ref = GalleryRef(author, null)
+        is Resolved.Gallery -> {
             try {
-                val profile = api.fetchArtistProfile(ref)
-                createMangaFromProfile(profile, ref)
+                val profile = api.fetchArtistProfile(resolved.ref)
+                listOf(createMangaFromProfile(profile, resolved.ref))
             } catch (_: Exception) {
-                null
+                emptyList()
             }
         }
-        is Resolved.Invalid -> null
+        is Resolved.NeedsOembed -> {
+            val dto = api.fetchOembedDto(resolved.url)
+            val author = dto?.authorName ?: api.resolveOembed(resolved.url)
+            if (author != null) {
+                val ref = GalleryRef(author, null)
+                val galleryManga = try {
+                    val profile = api.fetchArtistProfile(ref)
+                    createMangaFromProfile(profile, ref)
+                } catch (_: Exception) {
+                    null
+                }
+
+                val artworkManga = if (dto != null) {
+                    val rawUrl = dto.url ?: resolved.url
+                    val path = if (rawUrl.startsWith("http")) {
+                        rawUrl.removePrefix("https://www.deviantart.com").removePrefix("http://www.deviantart.com")
+                    } else {
+                        rawUrl
+                    }
+                    SManga.create().apply {
+                        url = path
+                        title = dto.title ?: "Artwork"
+                        this.author = author
+                        this.artist = author
+                        thumbnail_url = dto.thumbnailUrl ?: dto.url
+                        status = SManga.COMPLETED
+                        genre = "Artwork"
+                        initialized = true
+                    }
+                } else {
+                    null
+                }
+                listOfNotNull(artworkManga, galleryManga)
+            } else {
+                emptyList()
+            }
+        }
+        is Resolved.Invalid -> emptyList()
     }
 
     private fun createMangaFromProfile(profile: ArtistProfile, ref: GalleryRef): SManga = SManga.create().apply {
@@ -150,6 +214,38 @@ abstract class DeviantArt :
         fetchDetails: Boolean,
         fetchChapters: Boolean,
     ): SMangaUpdate {
+        if (manga.url.contains("/art/")) {
+            var updatedManga = manga
+            var updatedChapters = chapters
+
+            if (fetchDetails) {
+                val details = api.fetchArtworkDetails(manga.url)
+                updatedManga = manga.apply {
+                    title = details.title.ifBlank { manga.title }
+                    author = details.author.ifBlank { manga.author }
+                    artist = details.author.ifBlank { manga.artist }
+                    description = details.description
+                    thumbnail_url = details.thumbnailUrl ?: manga.thumbnail_url
+                    status = SManga.COMPLETED
+                    genre = "Artwork"
+                    initialized = true
+                }
+            }
+
+            if (fetchChapters) {
+                updatedChapters = listOf(
+                    SChapter.create().apply {
+                        url = manga.url
+                        name = updatedManga.title.ifBlank { "Artwork" }
+                        chapter_number = 1f
+                        date_upload = 0L
+                    },
+                )
+            }
+
+            return SMangaUpdate(updatedManga, updatedChapters)
+        }
+
         val ref = normalizeEntryUrl(manga.url)
             ?: throw IOException("Unrecognised library entry URL: ${manga.url}. Open the entry and use Migrate, or add it again.")
 

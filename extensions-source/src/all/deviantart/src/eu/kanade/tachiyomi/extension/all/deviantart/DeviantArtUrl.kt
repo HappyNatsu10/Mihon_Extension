@@ -6,6 +6,7 @@ data class GalleryRef(val user: String, val folderId: String? = null) {
 
 sealed interface Resolved {
     data class Gallery(val ref: GalleryRef) : Resolved
+    data class ArtworkAndGallery(val artworkPath: String, val ref: GalleryRef) : Resolved
     data class NeedsOembed(val url: String) : Resolved
     data object Invalid : Resolved
 }
@@ -17,7 +18,11 @@ fun entryUrl(ref: GalleryRef): String = "/${ref.user}/gallery/${ref.folderId ?: 
 fun normalizeEntryUrl(stored: String): GalleryRef? {
     val s = stored.trim()
     val candidate = if (s.startsWith("/")) "https://www.deviantart.com$s" else s
-    return (DeviantArtUrl.resolve(candidate) as? Resolved.Gallery)?.ref
+    return when (val r = DeviantArtUrl.resolve(candidate)) {
+        is Resolved.Gallery -> r.ref
+        is Resolved.ArtworkAndGallery -> r.ref
+        else -> null
+    }
 }
 
 object DeviantArtUrl {
@@ -77,12 +82,18 @@ object DeviantArtUrl {
     // `rest` = path segments after the username, e.g. ["gallery","12345","slug"], ["art","foo-999"], or [].
     private fun gallery(user: String, rest: List<String>): Resolved {
         if (!USER.matches(user)) return Resolved.Invalid
+        val firstSeg = rest.firstOrNull()?.lowercase()
+        if (firstSeg == "art") {
+            val slug = rest.drop(1).joinToString("/")
+            val path = "/$user/art/$slug"
+            return Resolved.ArtworkAndGallery(path, GalleryRef(user, null))
+        }
         val folder = rest.getOrNull(1)?.takeIf {
-            rest.getOrNull(0)?.equals("gallery", ignoreCase = true) == true &&
+            firstSeg == "gallery" &&
                 it.isNotEmpty() &&
                 it.all(Char::isDigit)
         }
-        // artwork links, /gallery, /gallery/all, /gallery/scraps and /favourites all map to the All gallery
+        // /gallery, /gallery/all, /gallery/scraps and /favourites all map to the All gallery
         return Resolved.Gallery(GalleryRef(user, folder))
     }
 }

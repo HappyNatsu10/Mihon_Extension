@@ -5,6 +5,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import uy.kohesive.injekt.Injekt
 import uy.kohesive.injekt.api.get
 import java.io.File
@@ -118,10 +119,11 @@ object GalleryCache {
 
         return mutex.withLock {
             val cached = loadCache(user, folderId)
+            val validCached = cached?.takeIf { it.schemaVersion >= 2 }
 
-            if (cached != null && cached.complete && cached.items.isNotEmpty()) {
+            if (validCached != null && validCached.complete && validCached.items.isNotEmpty()) {
                 // Incremental refresh: fetch page by page from offset 0 until a known id is found
-                val knownIds = cached.items.map { it.id }.toSet()
+                val knownIds = validCached.items.map { it.id }.toSet()
                 val newItems = mutableListOf<CachedItem>()
                 var currentOffset = 0
                 val startTime = System.currentTimeMillis()
@@ -135,7 +137,15 @@ object GalleryCache {
                     newItems.addAll(fresh)
 
                     if (foundKnown || !pageResult.hasNextPage) break
-                    currentOffset += 60
+
+                    val nextOffsetFromLink = pageResult.nextUrl?.let { link ->
+                        try {
+                            link.toHttpUrl().queryParameter("offset")?.toIntOrNull()
+                        } catch (_: Exception) {
+                            null
+                        }
+                    }
+                    currentOffset = nextOffsetFromLink ?: (currentOffset + page.size)
 
                     if (System.currentTimeMillis() - startTime > MAX_CRAWL_DURATION_MS) {
                         break
@@ -143,11 +153,11 @@ object GalleryCache {
                 }
 
                 val finalItems = if (newItems.isNotEmpty()) {
-                    val combined = newItems + cached.items
-                    saveCache(user, folderId, GalleryCacheData(schemaVersion = 1, complete = true, items = combined))
+                    val combined = newItems + validCached.items
+                    saveCache(user, folderId, GalleryCacheData(schemaVersion = 2, complete = true, items = combined))
                     combined
                 } else {
-                    cached.items
+                    validCached.items
                 }
 
                 // Enforce ledger superset invariant and preserve first-seen paths
@@ -155,16 +165,16 @@ object GalleryCache {
             }
 
             // Full crawl or resume partial crawl
-            val partialItems = cached?.items?.toMutableList() ?: mutableListOf()
+            val partialItems = validCached?.items?.toMutableList() ?: mutableListOf()
             val seenIds = partialItems.map { it.id }.toMutableSet()
-            var offset = maxOf(0, (partialItems.size / 60) * 60)
+            var offset = partialItems.size
             var pagesSinceSave = 0
             val crawlStartTime = System.currentTimeMillis()
 
             while (true) {
                 // Check 4-minute time budget (FR-12 item 7)
                 if (System.currentTimeMillis() - crawlStartTime > MAX_CRAWL_DURATION_MS) {
-                    saveCache(user, folderId, GalleryCacheData(schemaVersion = 1, complete = false, items = partialItems))
+                    saveCache(user, folderId, GalleryCacheData(schemaVersion = 2, complete = false, items = partialItems))
                     throw IOException(
                         "Loading gallery: ${partialItems.size} artworks cached so far. Update again to continue.",
                     )
@@ -182,7 +192,7 @@ object GalleryCache {
 
                 pagesSinceSave++
                 if (pagesSinceSave >= 20) {
-                    saveCache(user, folderId, GalleryCacheData(schemaVersion = 1, complete = false, items = partialItems))
+                    saveCache(user, folderId, GalleryCacheData(schemaVersion = 2, complete = false, items = partialItems))
                     pagesSinceSave = 0
                 }
 
@@ -190,10 +200,18 @@ object GalleryCache {
                     // Reached end of gallery
                     break
                 }
-                offset += 60
+
+                val nextOffsetFromLink = pageResult.nextUrl?.let { link ->
+                    try {
+                        link.toHttpUrl().queryParameter("offset")?.toIntOrNull()
+                    } catch (_: Exception) {
+                        null
+                    }
+                }
+                offset = nextOffsetFromLink ?: (offset + page.size)
             }
 
-            saveCache(user, folderId, GalleryCacheData(schemaVersion = 1, complete = true, items = partialItems))
+            saveCache(user, folderId, GalleryCacheData(schemaVersion = 2, complete = true, items = partialItems))
             // Reconcile with permanent ChapterLedger
             ChapterLedger.recordChapters(user, folderId, partialItems, debugLog)
         }

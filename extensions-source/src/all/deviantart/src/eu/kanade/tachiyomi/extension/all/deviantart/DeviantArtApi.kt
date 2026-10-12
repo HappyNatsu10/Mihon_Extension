@@ -33,7 +33,20 @@ class DeviantArtApi(
     /**
      * Resolves author name via oEmbed for non-user URLs.
      */
-    fun resolveOembed(url: String): String? {
+    fun resolveOembed(url: String): String? = fetchOembedDto(url)?.authorName
+
+    /**
+     * Fetches image URL via oEmbed for a specific deviation.
+     */
+    fun resolveOembedImage(url: String): String? {
+        val dto = fetchOembedDto(url) ?: return null
+        return dto.url ?: dto.thumbnailUrl
+    }
+
+    /**
+     * Fetches complete oEmbed DTO.
+     */
+    fun fetchOembedDto(url: String): OEmbedDto? {
         val oembedUrl = BACKEND_BASE_URL.toHttpUrl().newBuilder()
             .addPathSegment("oembed")
             .addQueryParameter("url", url)
@@ -43,30 +56,75 @@ class DeviantArtApi(
             val response = HttpGuard.executeWithRetry("oEmbed", debugLog) {
                 client.newCall(Request.Builder().url(oembedUrl).build()).execute()
             }
-            val dto = json.decodeFromString<OEmbedDto>(response.body.string())
-            dto.authorName
+            json.decodeFromString<OEmbedDto>(response.body.string())
         } catch (_: Exception) {
             null
         }
     }
 
     /**
-     * Fetches image URL via oEmbed for a specific deviation.
+     * Validates whether a URL points to actual artwork media, filtering out DeviantArt
+     * site icons, placeholders, avatars, and internal download redirects.
      */
-    fun resolveOembedImage(url: String): String? {
-        val oembedUrl = BACKEND_BASE_URL.toHttpUrl().newBuilder()
-            .addPathSegment("oembed")
-            .addQueryParameter("url", url)
-            .build()
+    fun isArtworkUrl(url: String): Boolean {
+        if (url.isBlank()) return false
+        val u = url.lowercase()
+        if (u.contains("st.deviantart.net")) return false
+        if (u.contains("touch-icon") || u.contains("favicon") || u.contains("da_logo") || u.contains("deviantart-logo")) return false
+        if (u.contains("default_avatar") || u.contains("placeholder") || u.contains("/avatars/")) return false
+        if (u.contains("/download/")) return false
+        return u.contains("wixmp.com") || (u.contains("deviantart.net") && !u.contains("st.deviantart.net"))
+    }
+
+    /**
+     * Fetches artwork metadata for standalone artwork library entries and search results.
+     */
+    fun fetchArtworkDetails(relativeOrFullUrl: String): ArtworkDetails {
+        val fullUrl = if (relativeOrFullUrl.startsWith("http")) relativeOrFullUrl else "$WEB_BASE_URL$relativeOrFullUrl"
+        val path = fullUrl.removePrefix(WEB_BASE_URL)
+        val defaultAuthor = path.removePrefix("/").substringBefore("/art/").substringBefore("/")
+        val defaultTitle = path.substringAfter("/art/").substringBeforeLast("-").replace("-", " ").ifBlank { "Artwork" }
+
+        val oembed = fetchOembedDto(fullUrl)
+        if (oembed != null) {
+            val author = oembed.authorName?.takeIf { it.isNotBlank() } ?: defaultAuthor
+            val title = oembed.title?.takeIf { it.isNotBlank() } ?: defaultTitle
+            val thumb = (oembed.thumbnailUrl ?: oembed.url)?.takeIf { isArtworkUrl(it) }
+            return ArtworkDetails(
+                title = title,
+                author = author,
+                description = null,
+                thumbnailUrl = thumb,
+            )
+        }
 
         return try {
-            val response = HttpGuard.executeWithRetry("oEmbed image", debugLog) {
-                client.newCall(Request.Builder().url(oembedUrl).build()).execute()
+            val response = HttpGuard.executeWithRetry("artwork metadata", debugLog) {
+                client.newCall(Request.Builder().url(fullUrl).build()).execute()
             }
-            val dto = json.decodeFromString<OEmbedDto>(response.body.string())
-            dto.url ?: dto.thumbnailUrl
+            val doc = Jsoup.parse(response.body.string(), fullUrl)
+            val title = doc.selectFirst("meta[property=og:title]")?.attr("content")?.substringBefore(" by ")?.trim()
+                ?: defaultTitle
+            val author = doc.selectFirst("meta[property=og:title]")?.attr("content")?.substringAfter(" by ")?.substringBefore(" on DeviantArt")?.trim()
+                ?: defaultAuthor
+            val desc = doc.selectFirst("meta[property=og:description]")?.attr("content")
+                ?: doc.selectFirst(".legacy-journal")?.wholeText()
+            val thumb = doc.selectFirst("img[fetchpriority=high]")?.absUrl("src")?.takeIf { isArtworkUrl(it) }
+                ?: doc.selectFirst("meta[property=og:image]")?.attr("content")?.takeIf { isArtworkUrl(it) }
+
+            ArtworkDetails(
+                title = title,
+                author = author,
+                description = desc,
+                thumbnailUrl = thumb,
+            )
         } catch (_: Exception) {
-            null
+            ArtworkDetails(
+                title = defaultTitle,
+                author = defaultAuthor,
+                description = null,
+                thumbnailUrl = null,
+            )
         }
     }
 
@@ -218,7 +276,11 @@ class DeviantArtApi(
 
         val xmlDocument = Jsoup.parse(response.body.string(), rssUrl.toString(), Parser.xmlParser())
         val items = xmlDocument.select("item")
-        val nextLink = xmlDocument.selectFirst("atom|link[rel=next], [rel=next]")?.attr("href")?.takeIf { it.isNotEmpty() }
+        val nextLink = xmlDocument.getElementsByTag("atom:link")
+            .firstOrNull { it.attr("rel") == "next" }
+            ?.attr("href")
+            ?.takeIf { it.isNotBlank() }
+            ?: xmlDocument.selectFirst("[rel=next]")?.attr("href")?.takeIf { it.isNotBlank() }
         val hasNext = nextLink != null || items.size >= 60
 
         val result = mutableListOf<CachedItem>()
@@ -273,7 +335,7 @@ class DeviantArtApi(
             }
         } catch (e: Exception) {
             // Fallback to oEmbed if webpage fetch fails
-            resolveOembedImage(fullUrl)?.let { return listOf(it) }
+            resolveOembedImage(fullUrl)?.takeIf { isArtworkUrl(it) }?.let { return listOf(it) }
             throw e
         }
 
@@ -290,8 +352,7 @@ class DeviantArtApi(
             if (childButtons.size > 1) {
                 val urls = childButtons.mapNotNull { btn ->
                     val rawSrc = btn.selectFirst("img")?.absUrl("src") ?: return@mapNotNull null
-                    val originalUrl = rawSrc.replaceFirst(IMAGE_ORIGINAL_URL_REGEX, "")
-                    if (originalUrl.isNotEmpty()) originalUrl else rawSrc
+                    if (isArtworkUrl(rawSrc)) rawSrc else null
                 }
                 if (urls.size > 1) return urls
             }
@@ -301,8 +362,7 @@ class DeviantArtApi(
         if (stageImages.size > 1) {
             val urls = stageImages.mapNotNull { img ->
                 val rawSrc = img.absUrl("src")
-                val originalUrl = rawSrc.replaceFirst(IMAGE_ORIGINAL_URL_REGEX, "")
-                if (originalUrl.isNotEmpty()) originalUrl else rawSrc
+                if (isArtworkUrl(rawSrc)) rawSrc else null
             }
             if (urls.size > 1) return urls
         }
@@ -321,11 +381,11 @@ class DeviantArtApi(
             null
         }
 
-        // Check download button (true original when allowed by artist)
+        // Check download button: only accept direct artwork image URLs, never internal /download/ endpoints that require login
         val downloadBtn = doc.selectFirst("a[data-hook=download_button]")
             ?: doc.selectFirst("a[aria-label=Download]")
             ?: doc.selectFirst("a[data-hook=action_download]")
-        val downloadUrl = downloadBtn?.absUrl("href")?.takeIf { it.isNotEmpty() }
+        val downloadUrl = downloadBtn?.absUrl("href")?.takeIf { it.isNotEmpty() && isArtworkUrl(it) }
         if (downloadUrl != null) {
             candidates.add(
                 CandidateRendition(
@@ -338,7 +398,7 @@ class DeviantArtApi(
             )
         }
 
-        // Single image fullview candidates
+        // Single image fullview candidates: prioritize main artwork renditions
         val mainImage = doc.selectFirst("img[fetchpriority=high]")
             ?: doc.selectFirst("img[property=contentUrl]")
             ?: doc.selectFirst("img[data-hook=deviation_link]")
@@ -346,7 +406,7 @@ class DeviantArtApi(
 
         mainImage?.let { img ->
             val src = img.absUrl("src")
-            if (src.isNotEmpty()) {
+            if (isArtworkUrl(src)) {
                 val w = img.attr("width").toIntOrNull() ?: origW ?: 1920
                 val h = img.attr("height").toIntOrNull() ?: origH ?: 1080
                 candidates.add(CandidateRendition(name = "fullview", width = w, height = h, url = src))
@@ -355,7 +415,7 @@ class DeviantArtApi(
 
         // OpenGraph fallback
         val ogImage = doc.selectFirst("meta[property=og:image]")?.attr("content")
-        if (!ogImage.isNullOrEmpty() && candidates.none { it.url == ogImage }) {
+        if (!ogImage.isNullOrEmpty() && isArtworkUrl(ogImage) && candidates.none { it.url == ogImage }) {
             candidates.add(
                 CandidateRendition(
                     name = "og:image",
@@ -378,13 +438,13 @@ class DeviantArtApi(
         }
 
         // 4. Last resort: oEmbed lookup
-        resolveOembedImage(fullUrl)?.let { return listOf(it) }
+        resolveOembedImage(fullUrl)?.takeIf { isArtworkUrl(it) }?.let { return listOf(it) }
 
         if (isLiterature) {
             throw IOException("This deviation is a text/literature post and cannot be viewed as an image")
         }
 
-        throw IOException("This artwork is not available without login")
+        throw IOException("This artwork is mature-restricted or requires login. Open this entry in WebView (globe icon) to view it.")
     }
 
     private fun extractLdJsonDimension(doc: Document, dimName: String): Int? {

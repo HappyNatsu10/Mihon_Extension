@@ -74,7 +74,7 @@ class DeviantArtUrlTest {
             DeviantArtUrl.resolve("https://www.deviantart.com/artist/favourites/555/x"),
         )
         assertEquals(
-            Resolved.Gallery(GalleryRef("artist", null)),
+            Resolved.ArtworkAndGallery("/artist/art/some-title-999", GalleryRef("artist", null)),
             DeviantArtUrl.resolve("https://www.deviantart.com/artist/art/some-title-999"),
         )
 
