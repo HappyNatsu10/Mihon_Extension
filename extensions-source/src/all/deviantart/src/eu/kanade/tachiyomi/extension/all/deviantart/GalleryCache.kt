@@ -110,7 +110,7 @@ object GalleryCache {
         user: String,
         folderId: String?,
         debugLog: Boolean = false,
-        fetchPageItems: suspend (offset: Int) -> List<CachedItem>,
+        fetchPageResult: suspend (offset: Int) -> RssPageResult,
     ): List<CachedItem> {
         val folderKey = folderId?.takeIf { !it.equals("all", ignoreCase = true) } ?: "all"
         val key = "${user.lowercase()}_$folderKey"
@@ -127,14 +127,15 @@ object GalleryCache {
                 val startTime = System.currentTimeMillis()
 
                 while (true) {
-                    val page = fetchPageItems(currentOffset)
+                    val pageResult = fetchPageResult(currentOffset)
+                    val page = pageResult.items
                     if (page.isEmpty()) break
 
                     val (fresh, foundKnown) = newItemsFromPage(knownIds, page)
                     newItems.addAll(fresh)
 
-                    if (foundKnown || page.size < 60) break
-                    currentOffset += page.size
+                    if (foundKnown || !pageResult.hasNextPage) break
+                    currentOffset += 60
 
                     if (System.currentTimeMillis() - startTime > MAX_CRAWL_DURATION_MS) {
                         break
@@ -156,7 +157,7 @@ object GalleryCache {
             // Full crawl or resume partial crawl
             val partialItems = cached?.items?.toMutableList() ?: mutableListOf()
             val seenIds = partialItems.map { it.id }.toMutableSet()
-            var offset = maxOf(0, partialItems.size - 60)
+            var offset = maxOf(0, (partialItems.size / 60) * 60)
             var pagesSinceSave = 0
             val crawlStartTime = System.currentTimeMillis()
 
@@ -169,7 +170,8 @@ object GalleryCache {
                     )
                 }
 
-                val page = fetchPageItems(offset)
+                val pageResult = fetchPageResult(offset)
+                val page = pageResult.items
                 if (page.isEmpty()) break
 
                 for (item in page) {
@@ -184,16 +186,26 @@ object GalleryCache {
                     pagesSinceSave = 0
                 }
 
-                if (page.size < 60 || offset >= 10000) {
-                    // RSS offset ceiling or end of gallery reached
+                if (!pageResult.hasNextPage || offset >= 25000) {
+                    // Reached end of gallery
                     break
                 }
-                offset += page.size
+                offset += 60
             }
 
             saveCache(user, folderId, GalleryCacheData(schemaVersion = 1, complete = true, items = partialItems))
             // Reconcile with permanent ChapterLedger
             ChapterLedger.recordChapters(user, folderId, partialItems, debugLog)
         }
+    }
+
+    suspend fun getOrCrawlGalleryWithItems(
+        user: String,
+        folderId: String?,
+        debugLog: Boolean = false,
+        fetchPageItems: suspend (offset: Int) -> List<CachedItem>,
+    ): List<CachedItem> = getOrCrawlGallery(user, folderId, debugLog) { offset ->
+        val items = fetchPageItems(offset)
+        RssPageResult(items, null, items.size >= 60)
     }
 }

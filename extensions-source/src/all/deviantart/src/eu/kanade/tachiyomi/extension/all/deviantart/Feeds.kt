@@ -20,7 +20,6 @@ class Feeds(
         val offset = (page - 1) * FEED_PAGE_SIZE
         val url = backendBaseUrl.toHttpUrl().newBuilder()
             .addPathSegment("rss.xml")
-            .addQueryParameter("q", "special:dd")
             .addQueryParameter("offset", offset.toString())
             .build()
 
@@ -32,6 +31,18 @@ class Feeds(
         val url = backendBaseUrl.toHttpUrl().newBuilder()
             .addPathSegment("rss.xml")
             .addQueryParameter("type", "deviation")
+            .addQueryParameter("offset", offset.toString())
+            .build()
+
+        return fetchFeed(url.toString())
+    }
+
+    fun search(query: String, page: Int, sortByNewest: Boolean = false): MangasPage {
+        val offset = (page - 1) * FEED_PAGE_SIZE
+        val q = if (sortByNewest) "sort:time $query" else query
+        val url = backendBaseUrl.toHttpUrl().newBuilder()
+            .addPathSegment("rss.xml")
+            .addQueryParameter("q", q)
             .addQueryParameter("offset", offset.toString())
             .build()
 
@@ -92,7 +103,12 @@ class Feeds(
 
     private fun fetchFeed(url: String): MangasPage {
         val request = Request.Builder().url(url).build()
-        val response = client.newCall(request).execute()
+        val response = try {
+            client.newCall(request).execute()
+        } catch (_: Exception) {
+            return MangasPage(emptyList(), false)
+        }
+
         if (!response.isSuccessful) {
             response.close()
             return MangasPage(emptyList(), false)
@@ -108,15 +124,23 @@ class Feeds(
         val mangas = mutableListOf<SManga>()
 
         for (item in items) {
-            val author = item.selectFirst("media|credit[role=author]")?.text()
-                ?: item.selectFirst("media|credit")?.text()
-                ?: continue
+            val link = item.selectFirst("link")?.text().orEmpty()
+            val author = item.getElementsByTag("media:credit").firstOrNull {
+                it.attr("role") == "author" && !it.text().startsWith("http")
+            }?.text()
+                ?: if (link.contains("/art/")) {
+                    link.removePrefix("https://www.deviantart.com/").removePrefix("http://www.deviantart.com/").substringBefore("/art/").substringBefore("/")
+                } else {
+                    null
+                }
 
-            if (author.startsWith("http") || !seenAuthors.add(author.lowercase())) {
+            if (author.isNullOrEmpty() || !seenAuthors.add(author.lowercase())) {
                 continue
             }
 
-            val thumbnail = item.selectFirst("media|thumbnail")?.attr("url")
+            val thumbnail = item.getElementsByTag("media:thumbnail").firstOrNull()?.attr("url")
+                ?: item.getElementsByTag("media:content").firstOrNull()?.attr("url")
+                ?: item.selectFirst("media|thumbnail")?.attr("url")
                 ?: item.selectFirst("media|content")?.attr("url")
 
             mangas.add(
@@ -132,7 +156,10 @@ class Feeds(
             )
         }
 
-        return MangasPage(mangas, hasNextPage = items.size >= FEED_PAGE_SIZE)
+        val nextLink = xml.selectFirst("atom|link[rel=next], [rel=next]")?.attr("href")
+        val hasNext = nextLink != null || items.size >= FEED_PAGE_SIZE
+
+        return MangasPage(mangas, hasNextPage = hasNext)
     }
 
     private fun isLoggedIn(): Boolean {

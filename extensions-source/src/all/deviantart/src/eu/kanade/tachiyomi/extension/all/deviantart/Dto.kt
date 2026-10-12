@@ -61,3 +61,9 @@ enum class QualityMode {
     BEST_AVAILABLE,
     STANDARD,
 }
+
+data class RssPageResult(
+    val items: List<CachedItem>,
+    val nextUrl: String? = null,
+    val hasNextPage: Boolean = false,
+)

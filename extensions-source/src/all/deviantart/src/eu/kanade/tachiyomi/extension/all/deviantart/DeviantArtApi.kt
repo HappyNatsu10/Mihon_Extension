@@ -190,11 +190,11 @@ class DeviantArtApi(
      * Fetches a single RSS page of deviations (for crawling/incremental sync).
      * Completeness invariant (FR-14 item 1): Nothing is silently dropped.
      */
-    fun fetchRssPage(
+    fun fetchRssPageResult(
         user: String,
         folderId: String?,
         offset: Int,
-    ): List<CachedItem> {
+    ): RssPageResult {
         val query = if (folderId == null || folderId.equals("all", true)) {
             "gallery:$user"
         } else {
@@ -213,12 +213,13 @@ class DeviantArtApi(
                 client.newCall(Request.Builder().url(rssUrl).build()).execute()
             }
         } catch (_: Exception) {
-            return emptyList()
+            return RssPageResult(emptyList(), null, false)
         }
 
         val xmlDocument = Jsoup.parse(response.body.string(), rssUrl.toString(), Parser.xmlParser())
         val items = xmlDocument.select("item")
-        if (items.isEmpty()) return emptyList()
+        val nextLink = xmlDocument.selectFirst("atom|link[rel=next], [rel=next]")?.attr("href")?.takeIf { it.isNotEmpty() }
+        val hasNext = nextLink != null || items.size >= 60
 
         val result = mutableListOf<CachedItem>()
 
@@ -246,12 +247,18 @@ class DeviantArtApi(
             )
         }
 
-        return result
+        return RssPageResult(result, nextLink, hasNext)
     }
+
+    fun fetchRssPage(
+        user: String,
+        folderId: String?,
+        offset: Int,
+    ): List<CachedItem> = fetchRssPageResult(user, folderId, offset).items
 
     /**
      * Fetches fresh full-size image URL(s) for a single deviation (FR-5, FR-6, FR-14, FR-16).
-     * Selects uncropped, maximum resolution images via ImageSelector.
+     * Selects uncropped, maximum resolution images and preserves multi-page deviations.
      */
     fun fetchDeviationImages(
         relativeUrl: String,
@@ -259,12 +266,15 @@ class DeviantArtApi(
     ): List<String> {
         val fullUrl = if (relativeUrl.startsWith("http")) relativeUrl else "$WEB_BASE_URL$relativeUrl"
 
-        // 1. Try oEmbed lookup
-        resolveOembedImage(fullUrl)?.let { return listOf(it) }
-
-        // 2. Scrape deviation webpage
-        val response = HttpGuard.executeWithRetry("artwork fetch", debugLog) {
-            client.newCall(Request.Builder().url(fullUrl).build()).execute()
+        // 1. Scrape deviation webpage
+        val response = try {
+            HttpGuard.executeWithRetry("artwork fetch", debugLog) {
+                client.newCall(Request.Builder().url(fullUrl).build()).execute()
+            }
+        } catch (e: Exception) {
+            // Fallback to oEmbed if webpage fetch fails
+            resolveOembedImage(fullUrl)?.let { return listOf(it) }
+            throw e
         }
 
         val html = response.body.string()
@@ -272,6 +282,32 @@ class DeviantArtApi(
 
         // Check if literature / text deviation
         val isLiterature = doc.selectFirst(".legacy-journal") != null || doc.selectFirst("[data-hook=art_stage] p") != null
+
+        // 2. Check for multi-image deviation (buttons with thumbnails, carousels, attached pages)
+        val buttonContainers = doc.select("[draggable=false]")
+        for (container in buttonContainers) {
+            val childButtons = container.children().filter { it.selectFirst("img") != null }
+            if (childButtons.size > 1) {
+                val urls = childButtons.mapNotNull { btn ->
+                    val rawSrc = btn.selectFirst("img")?.absUrl("src") ?: return@mapNotNull null
+                    val originalUrl = rawSrc.replaceFirst(IMAGE_ORIGINAL_URL_REGEX, "")
+                    if (originalUrl.isNotEmpty()) originalUrl else rawSrc
+                }
+                if (urls.size > 1) return urls
+            }
+        }
+
+        val stageImages = doc.select("[data-hook=art_stage] img")
+        if (stageImages.size > 1) {
+            val urls = stageImages.mapNotNull { img ->
+                val rawSrc = img.absUrl("src")
+                val originalUrl = rawSrc.replaceFirst(IMAGE_ORIGINAL_URL_REGEX, "")
+                if (originalUrl.isNotEmpty()) originalUrl else rawSrc
+            }
+            if (urls.size > 1) return urls
+        }
+
+        // 3. Single image candidate collection
         val candidates = mutableListOf<CandidateRendition>()
 
         // Check original dimensions
@@ -285,9 +321,10 @@ class DeviantArtApi(
             null
         }
 
-        // Check download button (true original)
+        // Check download button (true original when allowed by artist)
         val downloadBtn = doc.selectFirst("a[data-hook=download_button]")
             ?: doc.selectFirst("a[aria-label=Download]")
+            ?: doc.selectFirst("a[data-hook=action_download]")
         val downloadUrl = downloadBtn?.absUrl("href")?.takeIf { it.isNotEmpty() }
         if (downloadUrl != null) {
             candidates.add(
@@ -301,19 +338,11 @@ class DeviantArtApi(
             )
         }
 
-        // Multi-image deviation buttons
-        val buttons = doc.selectFirst("[draggable=false]")?.children()
-        if (buttons != null && buttons.isNotEmpty()) {
-            val urls = buttons.mapNotNull { btn ->
-                btn.selectFirst("img")?.absUrl("src")
-            }
-            if (urls.isNotEmpty()) return urls
-        }
-
         // Single image fullview candidates
         val mainImage = doc.selectFirst("img[fetchpriority=high]")
             ?: doc.selectFirst("img[property=contentUrl]")
             ?: doc.selectFirst("img[data-hook=deviation_link]")
+            ?: doc.selectFirst("div[data-hook=art_stage] img")
 
         mainImage?.let { img ->
             val src = img.absUrl("src")
@@ -348,6 +377,9 @@ class DeviantArtApi(
             return listOf(selected.url)
         }
 
+        // 4. Last resort: oEmbed lookup
+        resolveOembedImage(fullUrl)?.let { return listOf(it) }
+
         if (isLiterature) {
             throw IOException("This deviation is a text/literature post and cannot be viewed as an image")
         }
@@ -381,5 +413,6 @@ class DeviantArtApi(
         private val NUMBER_OF_ITEMS_REGEX = Regex(""""numberOfItems"\s*:\s*(\d+)""")
         private val WORKS_OF_ART_REGEX = Regex("""(\d[\d,]*)\s+works of art""", RegexOption.IGNORE_CASE)
         private val DEVIATION_ID_REGEX = Regex("""-(\d+)$""")
+        private val IMAGE_ORIGINAL_URL_REGEX = Regex("""/v1(/.*)?(?=\?)""")
     }
 }

@@ -77,18 +77,35 @@ abstract class DeviantArt :
     override suspend fun getSearchMangaList(page: Int, query: String, filters: FilterList): MangasPage {
         val trimmedQuery = query.trim()
 
-        // 1. Followed feed trigger (FR-7)
         val feedFilter = filters.filterIsInstance<FeedFilter>().firstOrNull()
-        if (trimmedQuery.equals("feed:followed", ignoreCase = true) || feedFilter?.state == 1) {
+        val sortFilter = filters.filterIsInstance<SortFilter>().firstOrNull()
+        val isSortNewest = sortFilter?.state == 1
+
+        // 1. Followed feed trigger (FR-7)
+        if (trimmedQuery.equals("feed:followed", ignoreCase = true) || feedFilter?.state == 2) {
             return feeds.followed(page)
         }
 
-        if (page > 1) return MangasPage(emptyList(), false)
+        // 2. Empty query: return selected feed (Popular or Latest)
+        if (trimmedQuery.isEmpty()) {
+            return when (feedFilter?.state) {
+                1 -> feeds.latest(page)
+                else -> feeds.popular(page)
+            }
+        }
 
-        // 2. Link or username resolution (FR-2 & FR-15)
+        // 3. Link or username resolution (FR-2 & FR-15)
         val resolved = DeviantArtUrl.resolve(trimmedQuery)
-        val manga = resolveToManga(resolved) ?: return MangasPage(emptyList(), false)
-        return MangasPage(listOf(manga), false)
+        if (resolved !is Resolved.Invalid) {
+            if (page > 1) return MangasPage(emptyList(), false)
+            val manga = resolveToManga(resolved)
+            if (manga != null) {
+                return MangasPage(listOf(manga), false)
+            }
+        }
+
+        // 4. Keyword search on DeviantArt
+        return feeds.search(trimmedQuery, page, sortByNewest = isSortNewest)
     }
 
     private fun resolveToManga(resolved: Resolved): SManga? = when (resolved) {
@@ -179,7 +196,7 @@ abstract class DeviantArt :
                     folderId = ref.folderId,
                     debugLog = preferences.debugLog,
                 ) { offset ->
-                    api.fetchRssPage(ref.user, ref.folderId, offset)
+                    api.fetchRssPageResult(ref.user, ref.folderId, offset)
                 }
 
                 val total = items.size
@@ -235,15 +252,22 @@ abstract class DeviantArt :
     // ============================== Filters ====================================
 
     override fun getFilterList(data: JsonElement?): FilterList = FilterList(
-        Filter.Header("Paste a DeviantArt link in the search bar to open a gallery"),
+        Filter.Header("Paste a DeviantArt link to open a gallery, or search keywords"),
         Filter.Separator(),
         FeedFilter(),
+        SortFilter(),
     )
 
     private class FeedFilter :
         Filter.Select<String>(
             "Feed",
-            arrayOf("None", "Latest from followed Deviants"),
+            arrayOf("Popular", "Latest", "Latest from followed Deviants"),
+        )
+
+    private class SortFilter :
+        Filter.Select<String>(
+            "Sort",
+            arrayOf("Popular", "Newest"),
         )
 
     // ============================== Settings ===================================
