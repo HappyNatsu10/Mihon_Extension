@@ -19,3 +19,7 @@ Thumbs.db
 
 # Upstream git backup
 **/.git_backup/
+
+# Archives
+*.rar
+*.zip
