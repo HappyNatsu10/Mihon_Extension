@@ -196,7 +196,7 @@ object GalleryCache {
                     pagesSinceSave = 0
                 }
 
-                if (!pageResult.hasNextPage || offset >= 25000) {
+                if (!pageResult.hasNextPage) {
                     // Reached end of gallery
                     break
                 }
