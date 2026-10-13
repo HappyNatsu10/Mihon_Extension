@@ -129,22 +129,23 @@ class DeviantArtApi(
     }
 
     /**
-     * Fetches artist and gallery metadata (All or specific folder).
+     * Fetches artist and gallery metadata (All or specific folder, or favourites).
      */
     fun fetchArtistProfile(ref: GalleryRef): ArtistProfile {
-        val key = "${ref.user.lowercase()}_${ref.folderId ?: "all"}"
+        val section = if (ref.isFavourites) "favourites" else "gallery"
+        val key = "${ref.user.lowercase()}_${if (ref.isFavourites) "fav_" else ""}${ref.folderId ?: "all"}"
         val now = System.currentTimeMillis()
         profileCache[key]?.let { (cached, time) ->
             if (now - time < CACHE_TTL_MS) return cached
         }
 
         val galleryUrl = if (ref.isAll) {
-            "$WEB_BASE_URL/${ref.user}/gallery/all"
+            "$WEB_BASE_URL/${ref.user}/$section/all"
         } else {
-            "$WEB_BASE_URL/${ref.user}/gallery/${ref.folderId}"
+            "$WEB_BASE_URL/${ref.user}/$section/${ref.folderId}"
         }
 
-        val response = HttpGuard.executeWithRetry("gallery metadata", debugLog) {
+        val response = HttpGuard.executeWithRetry("$section metadata", debugLog) {
             client.newCall(Request.Builder().url(galleryUrl).build()).execute()
         }
 
@@ -154,7 +155,7 @@ class DeviantArtApi(
         val totalDeviations = extractTotalFromHtml(document)
         val avatarUrl = extractAvatarUrl(document)
         val folderName = if (!ref.isAll) extractFolderName(document, ref.folderId!!) else null
-        val description = extractDescription(document, totalDeviations, folderName)
+        val description = extractDescription(document, totalDeviations, folderName, ref.isFavourites)
         val canonicalName = extractCanonicalUsername(document, ref.user)
 
         val profile = ArtistProfile(
@@ -170,7 +171,7 @@ class DeviantArtApi(
     }
 
     fun getCachedTotal(ref: GalleryRef): Int? {
-        val key = "${ref.user.lowercase()}_${ref.folderId ?: "all"}"
+        val key = "${ref.user.lowercase()}_${if (ref.isFavourites) "fav_" else ""}${ref.folderId ?: "all"}"
         val now = System.currentTimeMillis()
         return profileCache[key]?.let { (cached, time) ->
             if (now - time < CACHE_TTL_MS) cached.totalDeviations else null
@@ -220,9 +221,15 @@ class DeviantArtApi(
         return "Folder $fallbackId"
     }
 
-    private fun extractDescription(document: Document, total: Int, folderName: String?): String {
+    private fun extractDescription(
+        document: Document,
+        total: Int,
+        folderName: String?,
+        isFavourites: Boolean = false,
+    ): String {
         val folderPrefix = if (folderName != null) "Folder: $folderName\n" else ""
-        val countInfo = if (total > 0) "Gallery: ~$total artworks\n\n" else "\n"
+        val sectionName = if (isFavourites) "Favourites" else "Gallery"
+        val countInfo = if (total > 0) "$sectionName: ~$total artworks\n\n" else "\n"
         val bio = document.selectFirst("meta[property=og:description]")?.attr("content")
             ?: document.selectFirst(".legacy-journal")?.wholeText()
             ?: document.selectFirst("meta[name=description]")?.attr("content")
@@ -233,12 +240,12 @@ class DeviantArtApi(
     private fun extractCanonicalUsername(document: Document, fallback: String): String {
         val ogTitle = document.selectFirst("meta[property=og:title]")?.attr("content")
         if (!ogTitle.isNullOrEmpty()) {
-            val user = ogTitle.substringBefore("'s Gallery").trim()
+            val user = ogTitle.substringBefore("'s Gallery").substringBefore("'s Favourites").substringBefore("'s Favorites").trim()
             if (user.isNotEmpty()) return user
         }
         val pageTitle = document.title()
         if (pageTitle.isNotEmpty()) {
-            val user = pageTitle.substringBefore("'s Gallery").substringBefore(" ").trim()
+            val user = pageTitle.substringBefore("'s Gallery").substringBefore("'s Favourites").substringBefore("'s Favorites").substringBefore(" ").trim()
             if (user.isNotEmpty()) return user
         }
         return fallback
@@ -251,12 +258,21 @@ class DeviantArtApi(
     fun fetchRssPageResult(
         user: String,
         folderId: String?,
-        offset: Int,
+        isFavourites: Boolean = false,
+        offset: Int = 0,
     ): RssPageResult {
-        val query = if (folderId == null || folderId.equals("all", true)) {
-            "gallery:$user"
+        val query = if (isFavourites) {
+            if (folderId == null || folderId.equals("all", true)) {
+                "favby:$user"
+            } else {
+                "favby:$user/$folderId"
+            }
         } else {
-            "gallery:$user/$folderId"
+            if (folderId == null || folderId.equals("all", true)) {
+                "gallery:$user"
+            } else {
+                "gallery:$user/$folderId"
+            }
         }
 
         val rssUrl = BACKEND_BASE_URL.toHttpUrl().newBuilder()
@@ -315,12 +331,19 @@ class DeviantArtApi(
     fun fetchRssPage(
         user: String,
         folderId: String?,
+        isFavourites: Boolean = false,
+        offset: Int = 0,
+    ): List<CachedItem> = fetchRssPageResult(user, folderId, isFavourites, offset).items
+
+    fun fetchRssPage(
+        user: String,
+        folderId: String?,
         offset: Int,
-    ): List<CachedItem> = fetchRssPageResult(user, folderId, offset).items
+    ): List<CachedItem> = fetchRssPageResult(user, folderId, false, offset).items
 
     /**
      * Fetches fresh full-size image URL(s) for a single deviation (FR-5, FR-6, FR-14, FR-16).
-     * Selects uncropped, maximum resolution images and preserves multi-page deviations.
+     * Selects uncropped, maximum resolution images, supports video deviations, and preserves multi-page deviations.
      */
     fun fetchDeviationImages(
         relativeUrl: String,
@@ -341,6 +364,22 @@ class DeviantArtApi(
 
         val html = response.body.string()
         val doc = Jsoup.parse(html, fullUrl)
+
+        // 2. Check for video deviation (Wix MP4 qualities or HTML5 video)
+        val devId = DEVIATION_ID_REGEX.find(relativeUrl)?.groupValues?.get(1)
+            ?: relativeUrl.substringAfterLast("-").substringAfterLast("/")
+        val videoUrls = extractVideoUrls(html, devId)
+        val bestVideo = pickBestVideoUrl(videoUrls, qualityMode)
+        if (bestVideo != null) {
+            val poster = doc.selectFirst("meta[property=og:image]")?.attr("content")?.takeIf { isArtworkUrl(it) }
+                ?: doc.selectFirst("img[fetchpriority=high]")?.absUrl("src")?.takeIf { isArtworkUrl(it) }
+            val maximizedPoster = poster?.let { ImageSelector.maximizeRendition(it) }
+            return if (maximizedPoster != null) {
+                listOf(maximizedPoster, bestVideo)
+            } else {
+                listOf(bestVideo)
+            }
+        }
 
         // Check if literature / text deviation
         val isLiterature = doc.selectFirst(".legacy-journal") != null || doc.selectFirst("[data-hook=art_stage] p") != null
@@ -464,6 +503,72 @@ class DeviantArtApi(
             ZonedDateTime.parse(dateStr, rfcDateFormatter).toInstant().toEpochMilli()
         } catch (_: DateTimeException) {
             0L
+        }
+    }
+
+    /**
+     * Extracts direct MP4 video URLs for a deviation if it is a video/film deviation.
+     */
+    fun extractVideoUrls(html: String, devId: String?): List<String> {
+        val unescaped = html
+            .replace("\\u002F", "/")
+            .replace("\\/", "/")
+            .replace("\\\"", "\"")
+
+        if (!devId.isNullOrBlank()) {
+            val m = Regex(""""deviationId"\s*:\s*$devId""").find(unescaped)
+            if (m != null) {
+                val idx = m.range.first
+                val snippet = unescaped.substring(idx, (idx + 8000).coerceAtMost(unescaped.length))
+                val isFilm = Regex(""""(?:type|filetype)"\s*:\s*"(?:film|video)"|"(?:isVideo|isMovie)"\s*:\s*true|"video"|VideoQualities""", RegexOption.IGNORE_CASE).containsMatchIn(snippet)
+                if (isFilm) {
+                    val directVideos = Regex("""https?://[^\s"\'<>]+\.mp4[^\s"\'<>]*""", RegexOption.IGNORE_CASE)
+                        .findAll(snippet)
+                        .map { it.value }
+                        .distinct()
+                        .toList()
+                    if (directVideos.isNotEmpty()) {
+                        return directVideos
+                    }
+                }
+            }
+        }
+
+        // HTML5 <video> / <source> tags
+        val doc = Jsoup.parse(html)
+        val html5Videos = mutableListOf<String>()
+        for (video in doc.select("video")) {
+            video.absUrl("src").takeIf { it.isNotBlank() && it.contains(".mp4", ignoreCase = true) }?.let { html5Videos.add(it) }
+            for (source in video.select("source")) {
+                source.absUrl("src").takeIf { it.isNotBlank() && it.contains(".mp4", ignoreCase = true) }?.let { html5Videos.add(it) }
+            }
+        }
+        if (html5Videos.isNotEmpty()) {
+            return html5Videos.distinct()
+        }
+
+        return emptyList()
+    }
+
+    /**
+     * Selects the highest quality or appropriate resolution video URL based on QualityMode.
+     */
+    fun pickBestVideoUrl(videoUrls: List<String>, qualityMode: QualityMode): String? {
+        if (videoUrls.isEmpty()) return null
+        if (videoUrls.size == 1) return videoUrls.first()
+
+        fun rank(url: String): Int = when {
+            url.contains("res_1080p", ignoreCase = true) || url.contains("1080p", ignoreCase = true) -> 1080
+            url.contains("res_720p", ignoreCase = true) || url.contains("720p", ignoreCase = true) -> 720
+            url.contains("res_480p", ignoreCase = true) || url.contains("480p", ignoreCase = true) -> 480
+            url.contains("res_360p", ignoreCase = true) || url.contains("360p", ignoreCase = true) -> 360
+            else -> 0
+        }
+
+        val sorted = videoUrls.sortedByDescending { rank(it) }
+        return when (qualityMode) {
+            QualityMode.STANDARD -> sorted.firstOrNull { rank(it) <= 720 } ?: sorted.last()
+            QualityMode.BEST_AVAILABLE -> sorted.first()
         }
     }
 

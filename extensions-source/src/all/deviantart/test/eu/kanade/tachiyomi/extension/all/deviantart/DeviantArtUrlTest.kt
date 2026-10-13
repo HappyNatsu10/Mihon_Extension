@@ -56,7 +56,7 @@ class DeviantArtUrlTest {
             DeviantArtUrl.resolve("Look at this https://www.deviantart.com/artist/gallery/12345678/my-folder!"),
         )
 
-        // 8. Adjacent links mapping to All: /gallery, /gallery/all, /gallery/scraps, /favourites/555/x, /art/some-title-999
+        // 8. Adjacent links mapping: /gallery, /gallery/all, /gallery/scraps, /favourites/555/x, /art/some-title-999
         assertEquals(
             Resolved.Gallery(GalleryRef("artist", null)),
             DeviantArtUrl.resolve("https://www.deviantart.com/artist/gallery"),
@@ -70,8 +70,16 @@ class DeviantArtUrlTest {
             DeviantArtUrl.resolve("https://www.deviantart.com/artist/gallery/scraps"),
         )
         assertEquals(
-            Resolved.Gallery(GalleryRef("artist", null)),
+            Resolved.Gallery(GalleryRef("artist", "555", isFavourites = true)),
             DeviantArtUrl.resolve("https://www.deviantart.com/artist/favourites/555/x"),
+        )
+        assertEquals(
+            Resolved.Gallery(GalleryRef("artist", null, isFavourites = true)),
+            DeviantArtUrl.resolve("https://www.deviantart.com/artist/favourites"),
+        )
+        assertEquals(
+            Resolved.Gallery(GalleryRef("artist", null, isFavourites = true)),
+            DeviantArtUrl.resolve("https://www.deviantart.com/artist/favourites/all"),
         )
         assertEquals(
             Resolved.ArtworkAndGallery("/artist/art/some-title-999", GalleryRef("artist", null)),
@@ -101,6 +109,14 @@ class DeviantArtUrlTest {
             GalleryRef("artist", null),
             normalizeEntryUrl("/artist/gallery/all"),
         )
+        assertEquals(
+            GalleryRef("artist", "555", isFavourites = true),
+            normalizeEntryUrl("/artist/favourites/555"),
+        )
+        assertEquals(
+            GalleryRef("artist", null, isFavourites = true),
+            normalizeEntryUrl("/artist/favourites/all"),
+        )
     }
 
     @Test
@@ -112,23 +128,40 @@ class DeviantArtUrlTest {
         val folderRef = GalleryRef("Yuumei", "456789")
         assertEquals("/Yuumei/gallery/456789", entryUrl(folderRef))
         assertEquals(folderRef, normalizeEntryUrl(entryUrl(folderRef)))
+
+        val favAllRef = GalleryRef("Yuumei", null, isFavourites = true)
+        assertEquals("/Yuumei/favourites/all", entryUrl(favAllRef))
+        assertEquals(favAllRef, normalizeEntryUrl(entryUrl(favAllRef)))
+
+        val favFolderRef = GalleryRef("Yuumei", "1195411", isFavourites = true)
+        assertEquals("/Yuumei/favourites/1195411", entryUrl(favFolderRef))
+        assertEquals(favFolderRef, normalizeEntryUrl(entryUrl(favFolderRef)))
     }
 
     @Test
     fun testSeparateCacheAndLedgerFileNames() {
         val allRef = GalleryRef("Yuumei", null)
         val folderRef = GalleryRef("Yuumei", "456789")
+        val favRef = GalleryRef("Yuumei", "1195411", isFavourites = true)
 
-        val allCache = GalleryCache.cacheFile(allRef.user, allRef.folderId)
-        val folderCache = GalleryCache.cacheFile(folderRef.user, folderRef.folderId)
+        val allCache = GalleryCache.cacheFile(allRef.user, allRef.folderId, allRef.isFavourites)
+        val folderCache = GalleryCache.cacheFile(folderRef.user, folderRef.folderId, folderRef.isFavourites)
+        val favCache = GalleryCache.cacheFile(favRef.user, favRef.folderId, favRef.isFavourites)
+
         assertNotEquals(allCache.name, folderCache.name)
+        assertNotEquals(allCache.name, favCache.name)
         assertEquals("yuumei_all.json", allCache.name)
         assertEquals("yuumei_456789.json", folderCache.name)
+        assertEquals("yuumei_fav_1195411.json", favCache.name)
 
-        val allLedger = ChapterLedger.ledgerFile(allRef.user, allRef.folderId)
-        val folderLedger = ChapterLedger.ledgerFile(folderRef.user, folderRef.folderId)
+        val allLedger = ChapterLedger.ledgerFile(allRef.user, allRef.folderId, allRef.isFavourites)
+        val folderLedger = ChapterLedger.ledgerFile(folderRef.user, folderRef.folderId, folderRef.isFavourites)
+        val favLedger = ChapterLedger.ledgerFile(favRef.user, favRef.folderId, favRef.isFavourites)
+
         assertNotEquals(allLedger.name, folderLedger.name)
+        assertNotEquals(allLedger.name, favLedger.name)
         assertEquals("ledger_yuumei_all.json", allLedger.name)
         assertEquals("ledger_yuumei_456789.json", folderLedger.name)
+        assertEquals("ledger_yuumei_fav_1195411.json", favLedger.name)
     }
 }

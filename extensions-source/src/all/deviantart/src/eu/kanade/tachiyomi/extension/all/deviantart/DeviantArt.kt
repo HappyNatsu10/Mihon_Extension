@@ -137,34 +137,18 @@ abstract class DeviantArt :
                 initialized = true
             }
 
-            val galleryManga = try {
-                val profile = api.fetchArtistProfile(resolved.ref)
-                createMangaFromProfile(profile, resolved.ref)
-            } catch (_: Exception) {
-                null
-            }
-
-            listOfNotNull(artworkManga, galleryManga)
+            val galleryManga = createGalleryManga(resolved.ref)
+            listOf(artworkManga, galleryManga)
         }
         is Resolved.Gallery -> {
-            try {
-                val profile = api.fetchArtistProfile(resolved.ref)
-                listOf(createMangaFromProfile(profile, resolved.ref))
-            } catch (_: Exception) {
-                emptyList()
-            }
+            listOf(createGalleryManga(resolved.ref))
         }
         is Resolved.NeedsOembed -> {
             val dto = api.fetchOembedDto(resolved.url)
             val author = dto?.authorName ?: api.resolveOembed(resolved.url)
             if (author != null) {
                 val ref = GalleryRef(author, null)
-                val galleryManga = try {
-                    val profile = api.fetchArtistProfile(ref)
-                    createMangaFromProfile(profile, ref)
-                } catch (_: Exception) {
-                    null
-                }
+                val galleryManga = createGalleryManga(ref)
 
                 val artworkManga = if (dto != null) {
                     val rawUrl = dto.url ?: resolved.url
@@ -194,15 +178,41 @@ abstract class DeviantArt :
         is Resolved.Invalid -> emptyList()
     }
 
+    private fun createGalleryManga(ref: GalleryRef): SManga = try {
+        val profile = api.fetchArtistProfile(ref)
+        createMangaFromProfile(profile, ref)
+    } catch (_: Exception) {
+        val title = if (ref.isFavourites) {
+            if (ref.folderId != null) "${ref.user} – Favourite Folder ${ref.folderId}" else "${ref.user} – Favourites"
+        } else {
+            if (ref.folderId != null) "${ref.user} – Folder ${ref.folderId}" else "${ref.user} – Gallery"
+        }
+        SManga.create().apply {
+            url = entryUrl(ref)
+            this.title = title
+            this.author = ref.user
+            this.artist = ref.user
+            this.status = SManga.ONGOING
+            this.genre = if (ref.isFavourites) "Favourites" else "Gallery"
+            this.initialized = false
+        }
+    }
+
     private fun createMangaFromProfile(profile: ArtistProfile, ref: GalleryRef): SManga = SManga.create().apply {
         url = entryUrl(ref)
-        title = if (profile.folderName != null) "${profile.username} – ${profile.folderName}" else profile.username
+        title = if (profile.folderName != null) {
+            "${profile.username} – ${profile.folderName}"
+        } else if (ref.isFavourites) {
+            "${profile.username} – Favourites"
+        } else {
+            profile.username
+        }
         author = profile.username
         artist = profile.username
         description = profile.description
         thumbnail_url = profile.avatarUrl
         status = SManga.ONGOING
-        genre = "Gallery"
+        genre = if (ref.isFavourites) "Favourites" else "Gallery"
         initialized = true
     }
 
@@ -255,13 +265,19 @@ abstract class DeviantArt :
         if (fetchDetails) {
             val profile = api.fetchArtistProfile(ref)
             updatedManga = manga.apply {
-                title = if (profile.folderName != null) "${profile.username} – ${profile.folderName}" else profile.username
+                title = if (profile.folderName != null) {
+                    "${profile.username} – ${profile.folderName}"
+                } else if (ref.isFavourites) {
+                    "${profile.username} – Favourites"
+                } else {
+                    profile.username
+                }
                 author = profile.username
                 artist = profile.username
                 description = profile.description
                 thumbnail_url = profile.avatarUrl
                 status = SManga.ONGOING
-                genre = "Gallery"
+                genre = if (ref.isFavourites) "Favourites" else "Gallery"
                 initialized = true
             }
         }
@@ -277,7 +293,8 @@ abstract class DeviantArt :
                     chapterList.add(
                         SChapter.create().apply {
                             val folderSuffix = if (ref.isAll) "all" else ref.folderId
-                            url = "/${ref.user}/gallery/$folderSuffix?batch=$i&size=$batchSize"
+                            val section = if (ref.isFavourites) "favourites" else "gallery"
+                            url = "/${ref.user}/$section/$folderSuffix?batch=$i&size=$batchSize"
                             name = Batching.chapterName(i, batchSize, total)
                             chapter_number = (i + 1).toFloat()
                             date_upload = 0L
@@ -290,9 +307,10 @@ abstract class DeviantArt :
                 val items = GalleryCache.getOrCrawlGallery(
                     user = ref.user,
                     folderId = ref.folderId,
+                    isFavourites = ref.isFavourites,
                     debugLog = preferences.debugLog,
                 ) { offset ->
-                    api.fetchRssPageResult(ref.user, ref.folderId, offset)
+                    api.fetchRssPageResult(ref.user, ref.folderId, ref.isFavourites, offset)
                 }
 
                 val total = items.size

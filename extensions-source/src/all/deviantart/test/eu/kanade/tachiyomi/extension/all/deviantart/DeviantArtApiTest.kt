@@ -93,4 +93,37 @@ class DeviantArtApiTest {
         org.junit.Assert.assertFalse(api.isArtworkUrl("https://www.deviantart.com/download/12345/test.zip"))
         org.junit.Assert.assertFalse(api.isArtworkUrl("https://a.deviantart.net/avatars/u/s/user.jpg"))
     }
+
+    @Test
+    fun testExtractVideoUrls() {
+        val api = DeviantArtApi(OkHttpClient())
+        val html = """
+            <!DOCTYPE html>
+            <html>
+            <script>
+            window.__INITIAL_STATE__ = {
+                "deviationId": 1249044758,
+                "type": "film",
+                "isVideo": true,
+                "media": {
+                    "types": [
+                        {"t": "video", "h": 360, "q": "360p", "b": "https:\/\/wixmp-abc.wixmp.com\/v\/mp4\/test.VideoQualities.res_360p.mp4"},
+                        {"t": "video", "h": 720, "q": "720p", "b": "https:\/\/wixmp-abc.wixmp.com\/v\/mp4\/test.VideoQualities.res_720p.mp4"},
+                        {"t": "video", "h": 1080, "q": "1080p", "b": "https:\/\/wixmp-abc.wixmp.com\/v\/mp4\/test.VideoQualities.res_1080p.mp4"}
+                    ]
+                }
+            };
+            </script>
+            </html>
+        """.trimIndent()
+
+        val videos = api.extractVideoUrls(html, "1249044758")
+        assertEquals(3, videos.size)
+
+        val best = api.pickBestVideoUrl(videos, QualityMode.BEST_AVAILABLE)
+        assertEquals("https://wixmp-abc.wixmp.com/v/mp4/test.VideoQualities.res_1080p.mp4", best)
+
+        val std = api.pickBestVideoUrl(videos, QualityMode.STANDARD)
+        assertEquals("https://wixmp-abc.wixmp.com/v/mp4/test.VideoQualities.res_720p.mp4", std)
+    }
 }

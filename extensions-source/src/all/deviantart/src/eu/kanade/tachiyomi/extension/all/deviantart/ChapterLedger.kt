@@ -29,14 +29,15 @@ object ChapterLedger {
             }
         }
 
-    fun ledgerFile(user: String, folderId: String?): File {
+    fun ledgerFile(user: String, folderId: String?, isFavourites: Boolean = false): File {
         val folder = folderId?.takeIf { !it.equals("all", ignoreCase = true) } ?: "all"
-        val name = "ledger_${user.lowercase()}_$folder.json"
+        val prefix = if (isFavourites) "ledger_${user.lowercase()}_fav_" else "ledger_${user.lowercase()}_"
+        val name = "$prefix$folder.json"
         return storageDir.resolve(name)
     }
 
-    fun loadLedger(user: String, folderId: String?): ChapterLedgerData {
-        val file = ledgerFile(user, folderId)
+    fun loadLedger(user: String, folderId: String?, isFavourites: Boolean = false): ChapterLedgerData {
+        val file = ledgerFile(user, folderId, isFavourites)
         if (!file.exists()) return ChapterLedgerData()
         return try {
             json.decodeFromString<ChapterLedgerData>(file.readText())
@@ -48,8 +49,8 @@ object ChapterLedger {
         }
     }
 
-    fun saveLedger(user: String, folderId: String?, data: ChapterLedgerData) {
-        val file = ledgerFile(user, folderId)
+    fun saveLedger(user: String, folderId: String?, isFavourites: Boolean = false, data: ChapterLedgerData) {
+        val file = ledgerFile(user, folderId, isFavourites)
         try {
             val tmp = File.createTempFile("ledger_", ".tmp", storageDir)
             tmp.writeText(json.encodeToString(data))
@@ -71,10 +72,11 @@ object ChapterLedger {
     fun recordChapters(
         user: String,
         folderId: String?,
+        isFavourites: Boolean,
         crawledItems: List<CachedItem>,
         debugLog: Boolean = false,
     ): List<CachedItem> {
-        val ledger = loadLedger(user, folderId)
+        val ledger = loadLedger(user, folderId, isFavourites)
         val initialLedgerCount = ledger.entries.size
         var idsAdded = 0
         var pathsPreserved = 0
@@ -123,7 +125,7 @@ object ChapterLedger {
         }
 
         if (idsAdded > 0) {
-            saveLedger(user, folderId, ledger)
+            saveLedger(user, folderId, isFavourites, ledger)
         }
 
         if (debugLog) {
@@ -137,4 +139,11 @@ object ChapterLedger {
 
         return reconciledList
     }
+
+    fun recordChapters(
+        user: String,
+        folderId: String?,
+        crawledItems: List<CachedItem>,
+        debugLog: Boolean = false,
+    ): List<CachedItem> = recordChapters(user, folderId, false, crawledItems, debugLog)
 }

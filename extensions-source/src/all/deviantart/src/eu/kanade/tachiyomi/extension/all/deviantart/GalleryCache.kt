@@ -36,9 +36,10 @@ object GalleryCache {
             }
         }
 
-    fun cacheFile(user: String, folderId: String?): File {
+    fun cacheFile(user: String, folderId: String?, isFavourites: Boolean = false): File {
         val folder = folderId?.takeIf { !it.equals("all", ignoreCase = true) } ?: "all"
-        val slug = "${user.lowercase()}_$folder.json"
+        val prefix = if (isFavourites) "${user.lowercase()}_fav_" else "${user.lowercase()}_"
+        val slug = "$prefix$folder.json"
         return storageDir.resolve(slug)
     }
 
@@ -78,8 +79,8 @@ object GalleryCache {
      */
     fun chapterNumber(indexNewestFirst: Int, total: Int): Float = (total - indexNewestFirst).toFloat()
 
-    fun loadCache(user: String, folderId: String?): GalleryCacheData? {
-        val file = cacheFile(user, folderId)
+    fun loadCache(user: String, folderId: String?, isFavourites: Boolean = false): GalleryCacheData? {
+        val file = cacheFile(user, folderId, isFavourites)
         if (!file.exists()) return null
         return try {
             json.decodeFromString<GalleryCacheData>(file.readText())
@@ -89,8 +90,8 @@ object GalleryCache {
         }
     }
 
-    fun saveCache(user: String, folderId: String?, data: GalleryCacheData) {
-        val file = cacheFile(user, folderId)
+    fun saveCache(user: String, folderId: String?, isFavourites: Boolean = false, data: GalleryCacheData) {
+        val file = cacheFile(user, folderId, isFavourites)
         try {
             val tmp = File.createTempFile("cache_", ".tmp", storageDir)
             tmp.writeText(json.encodeToString(data))
@@ -110,15 +111,17 @@ object GalleryCache {
     suspend fun getOrCrawlGallery(
         user: String,
         folderId: String?,
+        isFavourites: Boolean = false,
         debugLog: Boolean = false,
         fetchPageResult: suspend (offset: Int) -> RssPageResult,
     ): List<CachedItem> {
         val folderKey = folderId?.takeIf { !it.equals("all", ignoreCase = true) } ?: "all"
-        val key = "${user.lowercase()}_$folderKey"
+        val prefix = if (isFavourites) "${user.lowercase()}_fav_" else "${user.lowercase()}_"
+        val key = "$prefix$folderKey"
         val mutex = mutexes.getOrPut(key) { Mutex() }
 
         return mutex.withLock {
-            val cached = loadCache(user, folderId)
+            val cached = loadCache(user, folderId, isFavourites)
             val validCached = cached?.takeIf { it.schemaVersion >= 2 }
 
             if (validCached != null && validCached.complete && validCached.items.isNotEmpty()) {
@@ -154,14 +157,14 @@ object GalleryCache {
 
                 val finalItems = if (newItems.isNotEmpty()) {
                     val combined = newItems + validCached.items
-                    saveCache(user, folderId, GalleryCacheData(schemaVersion = 2, complete = true, items = combined))
+                    saveCache(user, folderId, isFavourites, GalleryCacheData(schemaVersion = 2, complete = true, items = combined))
                     combined
                 } else {
                     validCached.items
                 }
 
                 // Enforce ledger superset invariant and preserve first-seen paths
-                return@withLock ChapterLedger.recordChapters(user, folderId, finalItems, debugLog)
+                return@withLock ChapterLedger.recordChapters(user, folderId, isFavourites, finalItems, debugLog)
             }
 
             // Full crawl or resume partial crawl
@@ -174,7 +177,7 @@ object GalleryCache {
             while (true) {
                 // Check 4-minute time budget (FR-12 item 7)
                 if (System.currentTimeMillis() - crawlStartTime > MAX_CRAWL_DURATION_MS) {
-                    saveCache(user, folderId, GalleryCacheData(schemaVersion = 2, complete = false, items = partialItems))
+                    saveCache(user, folderId, isFavourites, GalleryCacheData(schemaVersion = 2, complete = false, items = partialItems))
                     throw IOException(
                         "Loading gallery: ${partialItems.size} artworks cached so far. Update again to continue.",
                     )
@@ -192,7 +195,7 @@ object GalleryCache {
 
                 pagesSinceSave++
                 if (pagesSinceSave >= 20) {
-                    saveCache(user, folderId, GalleryCacheData(schemaVersion = 2, complete = false, items = partialItems))
+                    saveCache(user, folderId, isFavourites, GalleryCacheData(schemaVersion = 2, complete = false, items = partialItems))
                     pagesSinceSave = 0
                 }
 
@@ -211,18 +214,19 @@ object GalleryCache {
                 offset = nextOffsetFromLink ?: (offset + page.size)
             }
 
-            saveCache(user, folderId, GalleryCacheData(schemaVersion = 2, complete = true, items = partialItems))
+            saveCache(user, folderId, isFavourites, GalleryCacheData(schemaVersion = 2, complete = true, items = partialItems))
             // Reconcile with permanent ChapterLedger
-            ChapterLedger.recordChapters(user, folderId, partialItems, debugLog)
+            ChapterLedger.recordChapters(user, folderId, isFavourites, partialItems, debugLog)
         }
     }
 
     suspend fun getOrCrawlGalleryWithItems(
         user: String,
         folderId: String?,
+        isFavourites: Boolean = false,
         debugLog: Boolean = false,
         fetchPageItems: suspend (offset: Int) -> List<CachedItem>,
-    ): List<CachedItem> = getOrCrawlGallery(user, folderId, debugLog) { offset ->
+    ): List<CachedItem> = getOrCrawlGallery(user, folderId, isFavourites, debugLog) { offset ->
         val items = fetchPageItems(offset)
         RssPageResult(items, null, items.size >= 60)
     }

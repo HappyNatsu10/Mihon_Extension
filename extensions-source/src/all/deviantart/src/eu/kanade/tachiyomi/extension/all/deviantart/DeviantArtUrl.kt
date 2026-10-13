@@ -1,6 +1,10 @@
 package eu.kanade.tachiyomi.extension.all.deviantart
 
-data class GalleryRef(val user: String, val folderId: String? = null) {
+data class GalleryRef(
+    val user: String,
+    val folderId: String? = null,
+    val isFavourites: Boolean = false,
+) {
     val isAll: Boolean get() = folderId == null || folderId.equals("all", ignoreCase = true)
 }
 
@@ -12,7 +16,10 @@ sealed interface Resolved {
 }
 
 /** The ONLY place that builds a stored SManga.url (FR-15 item 2). */
-fun entryUrl(ref: GalleryRef): String = "/${ref.user}/gallery/${ref.folderId ?: "all"}"
+fun entryUrl(ref: GalleryRef): String {
+    val section = if (ref.isFavourites) "favourites" else "gallery"
+    return "/${ref.user}/$section/${ref.folderId ?: "all"}"
+}
 
 /** The ONLY place that reads a stored SManga.url (any legacy shape) or a pasted link. Null = unrecognised. */
 fun normalizeEntryUrl(stored: String): GalleryRef? {
@@ -84,16 +91,16 @@ object DeviantArtUrl {
         if (!USER.matches(user)) return Resolved.Invalid
         val firstSeg = rest.firstOrNull()?.lowercase()
         if (firstSeg == "art") {
-            val slug = rest.drop(1).joinToString("/")
+            val slug = rest.drop(1).joinToString("/").trimEnd('/')
             val path = "/$user/art/$slug"
             return Resolved.ArtworkAndGallery(path, GalleryRef(user, null))
         }
+        val isFav = firstSeg == "favourites" || firstSeg == "favorites"
         val folder = rest.getOrNull(1)?.takeIf {
-            firstSeg == "gallery" &&
+            (firstSeg == "gallery" || isFav) &&
                 it.isNotEmpty() &&
                 it.all(Char::isDigit)
         }
-        // /gallery, /gallery/all, /gallery/scraps and /favourites all map to the All gallery
-        return Resolved.Gallery(GalleryRef(user, folder))
+        return Resolved.Gallery(GalleryRef(user, folder, isFavourites = isFav))
     }
 }
