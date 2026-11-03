@@ -256,12 +256,16 @@ class Feeds(
             client.newCall(req).execute()
         }
         val html = response.use { it.body.string() }
+        api.updateCsrfFromHtml(html)
         val marker = "window.__INITIAL_STATE__ = JSON.parse(\""
         val start = html.indexOf(marker)
         if (start == -1) throw IOException("Failed to load home page")
 
         val startIdx = start + marker.length
-        val endIdx = html.indexOf("\");", startIdx).takeIf { it > startIdx } ?: html.length
+        var endIdx = html.indexOf("\");\n", startIdx)
+        if (endIdx == -1) endIdx = html.indexOf("\");\r\n", startIdx)
+        if (endIdx == -1) endIdx = html.indexOf("\");window.__", startIdx)
+        if (endIdx == -1) endIdx = html.indexOf("\");", startIdx).takeIf { it > startIdx } ?: html.length
         val escaped = html.substring(startIdx, endIdx).replace("\\'", "'")
         val rawJson = json.decodeFromString<String>("\"$escaped\"")
         val root = json.parseToJsonElement(rawJson).jsonObject

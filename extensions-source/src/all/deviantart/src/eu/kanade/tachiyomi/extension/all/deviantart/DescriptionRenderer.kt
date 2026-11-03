@@ -1,10 +1,14 @@
 package eu.kanade.tachiyomi.extension.all.deviantart
 
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Typeface
+import android.graphics.drawable.BitmapDrawable
+import android.os.Build
+import android.text.Html
 import android.text.Layout
 import android.text.StaticLayout
 import android.text.TextPaint
@@ -66,6 +70,22 @@ object DescriptionRenderer {
     }
 
     /**
+     * Converts HTML into formatted CharSequence (with bold, italic, and images),
+     * with fallback to plain text on JVM unit test environments.
+     */
+    fun parseHtmlToCharSequence(html: String, imageGetter: Html.ImageGetter? = null): CharSequence = try {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            Html.fromHtml(html, Html.FROM_HTML_MODE_LEGACY, imageGetter, null)
+        } else {
+            @Suppress("DEPRECATION")
+            Html.fromHtml(html, imageGetter, null)
+        }
+    } catch (_: Throwable) {
+        // JVM fallback where android.text.Html is stubbed
+        descriptionToText(html)
+    }
+
+    /**
      * Estimates or computes the number of description pages required for [desc].
      */
     fun computePageCount(desc: ArtworkDescription, maxPages: Int): Int {
@@ -73,8 +93,9 @@ object DescriptionRenderer {
         val textPaint = TextPaint().apply {
             textSize = 40f
         }
+        val charSequence = parseHtmlToCharSequence(desc.text)
         val layout = try {
-            StaticLayout.Builder.obtain(desc.text, 0, desc.text.length, textPaint, CONTENT_WIDTH)
+            StaticLayout.Builder.obtain(charSequence, 0, charSequence.length, textPaint, CONTENT_WIDTH)
                 .setAlignment(Layout.Alignment.ALIGN_NORMAL)
                 .setLineSpacing(0f, 1.35f)
                 .setIncludePad(false)
@@ -82,7 +103,7 @@ object DescriptionRenderer {
         } catch (_: Throwable) {
             // JVM fallback / legacy fallback
             @Suppress("DEPRECATION")
-            StaticLayout(desc.text, textPaint, CONTENT_WIDTH, Layout.Alignment.ALIGN_NORMAL, 1.35f, 0f, false)
+            StaticLayout(charSequence, textPaint, CONTENT_WIDTH, Layout.Alignment.ALIGN_NORMAL, 1.35f, 0f, false)
         }
 
         val lineHeights = (0 until layout.lineCount).map { i -> layout.getLineBottom(i) - layout.getLineTop(i) }
@@ -94,7 +115,12 @@ object DescriptionRenderer {
     /**
      * Renders page [pageNum] (1-based) to PNG byte array.
      */
-    fun renderPage(desc: ArtworkDescription, pageNum: Int, maxPages: Int): ByteArray {
+    fun renderPage(
+        desc: ArtworkDescription,
+        pageNum: Int,
+        maxPages: Int,
+        fetchImage: ((url: String) -> ByteArray?)? = null,
+    ): ByteArray {
         val titlePaint = TextPaint().apply {
             color = Color.parseColor("#111111")
             textSize = 52f
@@ -130,15 +156,47 @@ object DescriptionRenderer {
             isAntiAlias = true
         }
 
+        val imageGetter = if (fetchImage != null) {
+            Html.ImageGetter { source ->
+                try {
+                    val bytes = fetchImage(source)
+                    if (bytes != null && bytes.isNotEmpty()) {
+                        val origBmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                        if (origBmp != null) {
+                            val origW = origBmp.width
+                            val origH = origBmp.height
+                            val targetW = if (origW > CONTENT_WIDTH) CONTENT_WIDTH else origW
+                            val targetH = (origH.toLong() * targetW / origW).toInt()
+                            val scaled = Bitmap.createScaledBitmap(origBmp, targetW, targetH, true)
+                            if (scaled != origBmp) origBmp.recycle()
+                            BitmapDrawable(null, scaled).apply {
+                                setBounds(0, 0, targetW, targetH)
+                            }
+                        } else {
+                            null
+                        }
+                    } else {
+                        null
+                    }
+                } catch (_: Throwable) {
+                    null
+                }
+            }
+        } else {
+            null
+        }
+
+        val charSequence = parseHtmlToCharSequence(desc.text, imageGetter)
+
         val bodyLayout = try {
-            StaticLayout.Builder.obtain(desc.text, 0, desc.text.length, bodyPaint, CONTENT_WIDTH)
+            StaticLayout.Builder.obtain(charSequence, 0, charSequence.length, bodyPaint, CONTENT_WIDTH)
                 .setAlignment(Layout.Alignment.ALIGN_NORMAL)
                 .setLineSpacing(0f, 1.35f)
                 .setIncludePad(false)
                 .build()
         } catch (_: Throwable) {
             @Suppress("DEPRECATION")
-            StaticLayout(desc.text, bodyPaint, CONTENT_WIDTH, Layout.Alignment.ALIGN_NORMAL, 1.35f, 0f, false)
+            StaticLayout(charSequence, bodyPaint, CONTENT_WIDTH, Layout.Alignment.ALIGN_NORMAL, 1.35f, 0f, false)
         }
 
         val titleLayout = try {

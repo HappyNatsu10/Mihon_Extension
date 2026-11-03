@@ -9,6 +9,7 @@ import java.io.IOException
 
 class DescriptionInterceptor(
     private val fetchFallback: (devId: String) -> ArtworkDescription?,
+    private val maxPagesProvider: () -> Int = { 3 },
 ) : Interceptor {
 
     override fun intercept(chain: Interceptor.Chain): Response {
@@ -41,8 +42,24 @@ class DescriptionInterceptor(
             throw IOException("Could not load the artwork description")
         }
 
+        val fetchImage: (String) -> ByteArray? = { imgUrl ->
+            try {
+                val imgReq = request.newBuilder().url(imgUrl).build()
+                val imgResp = chain.proceed(imgReq)
+                if (imgResp.isSuccessful) {
+                    imgResp.body.bytes()
+                } else {
+                    imgResp.close()
+                    null
+                }
+            } catch (_: Exception) {
+                null
+            }
+        }
+
+        val maxPages = maxPagesProvider()
         val pngBytes = try {
-            DescriptionRenderer.renderPage(desc, pageNum, maxPages = 3)
+            DescriptionRenderer.renderPage(desc, pageNum, maxPages = maxPages, fetchImage = fetchImage)
         } catch (e: Exception) {
             throw IOException("Could not load the artwork description", e)
         }

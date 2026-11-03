@@ -38,7 +38,12 @@ abstract class DeviantArt :
     private val api by lazy { DeviantArtApi(client, preferences.debugLog) }
     private val feeds by lazy { Feeds(client, baseUrl, api) }
 
-    override fun OkHttpClient.Builder.configureClient(): OkHttpClient.Builder = addInterceptor(DescriptionInterceptor { devId -> api.fetchArtworkDescriptionById(devId) })
+    override fun OkHttpClient.Builder.configureClient(): OkHttpClient.Builder = addInterceptor(
+        DescriptionInterceptor(
+            fetchFallback = { devId -> api.fetchArtworkDescriptionById(devId) },
+            maxPagesProvider = { preferences.descriptionMaxPages },
+        ),
+    )
         .rateLimit(permits = 2, period = 1.seconds) { it.host == "backend.deviantart.com" }
         .rateLimit(permits = 2, period = 1.seconds) { it.host == "www.deviantart.com" }
         .rateLimit(permits = 10, period = 1.seconds) { it.host.endsWith("wixmp.com") }
@@ -207,7 +212,7 @@ abstract class DeviantArt :
         author = profile.username
         artist = profile.username
         description = profile.description
-        thumbnail_url = profile.avatarUrl
+        thumbnail_url = profile.coverUrl ?: profile.avatarUrl
         status = SManga.ONGOING
         genre = if (ref.isFavourites) "Favourites" else "Gallery"
         initialized = true
@@ -272,7 +277,7 @@ abstract class DeviantArt :
                 author = profile.username
                 artist = profile.username
                 description = profile.description
-                thumbnail_url = profile.avatarUrl
+                thumbnail_url = profile.coverUrl ?: profile.avatarUrl ?: manga.thumbnail_url
                 status = SManga.ONGOING
                 genre = if (ref.isFavourites) "Favourites" else "Gallery"
                 initialized = true
@@ -301,19 +306,25 @@ abstract class DeviantArt :
                 updatedChapters = chapterList
             } else {
                 // Default: One chapter per artwork via GalleryCache crawl, disk cache, and ChapterLedger (FR-4, FR-13, FR-14)
+                var useRss = false
                 val items = GalleryCache.getOrCrawlGallery(
                     user = ref.user,
                     folderId = ref.folderId,
                     isFavourites = ref.isFavourites,
                     debugLog = preferences.debugLog,
                 ) { offset ->
-                    try {
-                        api.fetchGalleryJson(ref.user, ref.folderId, ref.isFavourites, offset, limit = 24)
-                    } catch (e: Exception) {
-                        if (offset == 0 && !e.message.orEmpty().contains("403")) {
-                            api.fetchRssPageResult(ref.user, ref.folderId, ref.isFavourites, offset)
-                        } else {
-                            throw e
+                    if (useRss) {
+                        api.fetchRssPageResult(ref.user, ref.folderId, ref.isFavourites, offset)
+                    } else {
+                        try {
+                            api.fetchGalleryJson(ref.user, ref.folderId, ref.isFavourites, offset, limit = 60)
+                        } catch (e: Exception) {
+                            if (offset == 0 && !e.message.orEmpty().contains("403")) {
+                                useRss = true
+                                api.fetchRssPageResult(ref.user, ref.folderId, ref.isFavourites, offset)
+                            } else {
+                                throw e
+                            }
                         }
                     }
                 }

@@ -85,7 +85,8 @@ internal class AnimatedGifEncoder {
             writePixels()
             firstFrame = false
             return true
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            e.printStackTrace()
             return false
         }
     }
@@ -476,7 +477,7 @@ private class NeuQuant(
     private val alpharadbshift = alphabiasshift + radbiasshift
     private val alpharadbias = 1 shl alpharadbshift
 
-    private val network = Array(netsize) { DoubleArray(4) }
+    private val network = Array(netsize) { IntArray(4) }
     private val netindex = IntArray(256)
     private val bias = IntArray(netsize)
     private val freq = IntArray(netsize)
@@ -485,24 +486,33 @@ private class NeuQuant(
     init {
         for (i in 0 until netsize) {
             val v = (i shl (netbiasshift + 8)) / netsize
-            network[i][0] = v.toDouble()
-            network[i][1] = v.toDouble()
-            network[i][2] = v.toDouble()
+            network[i][0] = v
+            network[i][1] = v
+            network[i][2] = v
             freq[i] = intbias / netsize
             bias[i] = 0
+        }
+    }
+
+    private fun unbiasnet() {
+        for (i in 0 until netsize) {
+            network[i][0] = network[i][0] shr netbiasshift
+            network[i][1] = network[i][1] shr netbiasshift
+            network[i][2] = network[i][2] shr netbiasshift
+            network[i][3] = i
         }
     }
 
     private fun colorMap(): ByteArray {
         val map = ByteArray(3 * netsize)
         val index = IntArray(netsize)
-        for (i in 0 until netsize) index[network[i][3].toInt()] = i
+        for (i in 0 until netsize) index[network[i][3]] = i
         var k = 0
         for (i in 0 until netsize) {
             val j = index[i]
-            map[k++] = (network[j][0].toInt() shr netbiasshift).toByte()
-            map[k++] = (network[j][1].toInt() shr netbiasshift).toByte()
-            map[k++] = (network[j][2].toInt() shr netbiasshift).toByte()
+            map[k++] = network[j][0].toByte()
+            map[k++] = network[j][1].toByte()
+            map[k++] = network[j][2].toByte()
         }
         return map
     }
@@ -513,12 +523,12 @@ private class NeuQuant(
         for (i in 0 until netsize) {
             val p = network[i]
             var smallpos = i
-            var smallval = p[1].toInt()
+            var smallval = p[1]
             for (j in (i + 1) until netsize) {
                 val q = network[j]
-                if (q[1].toInt() < smallval) {
+                if (q[1] < smallval) {
                     smallpos = j
-                    smallval = q[1].toInt()
+                    smallval = q[1]
                 }
             }
             val q = network[smallpos]
@@ -541,9 +551,11 @@ private class NeuQuant(
     }
 
     private fun learn() {
-        if (lengthcount < minpicturebytes) return
+        var sample = samplefac
+        if (lengthcount < minpicturebytes) sample = 1
+        alphadec = 30 + ((sample - 1) / 3)
         val lengthcountLocal = lengthcount
-        val samplepixels = lengthcountLocal / (3 * samplefac)
+        val samplepixels = lengthcountLocal / (3 * sample)
         var delta = samplepixels / ncycles
         var alpha = initalpha
         var radius = initradius
@@ -601,44 +613,44 @@ private class NeuQuant(
         while (i < netsize || j >= 0) {
             if (i < netsize) {
                 val p = network[i]
-                var dist = p[1].toInt() - g
+                var dist = p[1] - g
                 if (dist >= bestd) {
                     i = netsize
                 } else {
                     i++
                     if (dist < 0) dist = -dist
-                    var a = p[0].toInt() - b
+                    var a = p[0] - b
                     if (a < 0) a = -a
                     dist += a
                     if (dist < bestd) {
-                        a = p[2].toInt() - r
+                        a = p[2] - r
                         if (a < 0) a = -a
                         dist += a
                         if (dist < bestd) {
                             bestd = dist
-                            best = p[3].toInt()
+                            best = p[3]
                         }
                     }
                 }
             }
             if (j >= 0) {
                 val p = network[j]
-                var dist = g - p[1].toInt()
+                var dist = g - p[1]
                 if (dist >= bestd) {
                     j = -1
                 } else {
                     j--
                     if (dist < 0) dist = -dist
-                    var a = p[0].toInt() - b
+                    var a = p[0] - b
                     if (a < 0) a = -a
                     dist += a
                     if (dist < bestd) {
-                        a = p[2].toInt() - r
+                        a = p[2] - r
                         if (a < 0) a = -a
                         dist += a
                         if (dist < bestd) {
                             bestd = dist
-                            best = p[3].toInt()
+                            best = p[3]
                         }
                     }
                 }
@@ -649,6 +661,7 @@ private class NeuQuant(
 
     fun process(): ByteArray {
         learn()
+        unbiasnet()
         inxbuild()
         return colorMap()
     }
@@ -698,7 +711,7 @@ private class NeuQuant(
 
         for (i in 0 until netsize) {
             val n = network[i]
-            var dist = abs(n[0].toInt() - b) + abs(n[1].toInt() - g) + abs(n[2].toInt() - r)
+            var dist = abs(n[0] - b) + abs(n[1] - g) + abs(n[2] - r)
             if (dist < bestd) {
                 bestd = dist
                 bestpos = i

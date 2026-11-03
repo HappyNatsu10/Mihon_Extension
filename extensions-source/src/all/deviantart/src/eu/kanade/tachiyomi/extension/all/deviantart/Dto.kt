@@ -24,6 +24,7 @@ data class ArtistProfile(
     val avatarUrl: String? = null,
     val description: String? = null,
     val folderName: String? = null,
+    val coverUrl: String? = null,
 )
 
 @Serializable

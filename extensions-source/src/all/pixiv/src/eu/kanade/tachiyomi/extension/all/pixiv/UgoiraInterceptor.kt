@@ -45,8 +45,12 @@ internal class UgoiraInterceptor : Interceptor {
         val cacheDir = File(applicationContext.cacheDir, "pixiv_ugoira_cache").apply { mkdirs() }
         val cacheFile = File(cacheDir, "$illustId.gif")
 
-        if (cacheFile.exists() && cacheFile.length() > 0) {
-            return buildGifResponse(request, cacheFile)
+        if (cacheFile.exists()) {
+            if (cacheFile.length() > 100) {
+                return buildGifResponse(request, cacheFile)
+            } else {
+                cacheFile.delete()
+            }
         }
 
         val meta = UgoiraMetaStore.get(illustId) ?: fetchMeta(illustId, chain)
@@ -88,6 +92,10 @@ internal class UgoiraInterceptor : Interceptor {
             encoder.setRepeat(0) // loop indefinitely
             encoder.setQuality(10) // good visual quality
 
+            var framesAdded = 0
+            var canvasWidth = 0
+            var canvasHeight = 0
+
             FileOutputStream(tempFile).use { fos ->
                 if (!encoder.start(fos)) {
                     throw IOException("Pixiv Ugoira: failed to initialize GIF encoder")
@@ -101,10 +109,17 @@ internal class UgoiraInterceptor : Interceptor {
 
                 for (frame in frameList) {
                     val frameBytes = framesMap[frame.file] ?: continue
-                    val bitmap = decodeAndScaleBitmap(frameBytes) ?: continue
+                    val bitmap = decodeAndScaleBitmap(frameBytes, canvasWidth, canvasHeight) ?: continue
                     try {
+                        if (framesAdded == 0) {
+                            canvasWidth = bitmap.width
+                            canvasHeight = bitmap.height
+                        }
                         encoder.setDelay(frame.delay.coerceAtLeast(10))
-                        encoder.addFrame(bitmap)
+                        val added = encoder.addFrame(bitmap)
+                        if (added) {
+                            framesAdded++
+                        }
                     } finally {
                         bitmap.recycle()
                     }
@@ -113,12 +128,12 @@ internal class UgoiraInterceptor : Interceptor {
                 encoder.finish()
             }
 
-            if (tempFile.exists() && tempFile.length() > 0) {
-                if (cacheFile.exists()) cacheFile.delete()
-                tempFile.renameTo(cacheFile)
-            } else {
-                throw IOException("Pixiv Ugoira: failed to encode GIF for $illustId")
+            if (framesAdded == 0 || !tempFile.exists() || tempFile.length() <= 100) {
+                throw IOException("Pixiv Ugoira: failed to encode GIF or no valid frames for $illustId")
             }
+
+            if (cacheFile.exists()) cacheFile.delete()
+            tempFile.renameTo(cacheFile)
         } finally {
             if (tempFile.exists()) tempFile.delete()
         }
@@ -126,15 +141,18 @@ internal class UgoiraInterceptor : Interceptor {
         return buildGifResponse(request, cacheFile)
     }
 
-    private fun decodeAndScaleBitmap(bytes: ByteArray): Bitmap? {
+    private fun decodeAndScaleBitmap(bytes: ByteArray, targetW: Int = 0, targetH: Int = 0): Bitmap? {
         val boundsOpts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeByteArray(bytes, 0, bytes.size, boundsOpts)
+        if (boundsOpts.outWidth <= 0 || boundsOpts.outHeight <= 0) return null
 
         val maxDim = 800
         var sampleSize = 1
         var w = boundsOpts.outWidth
         var h = boundsOpts.outHeight
-        while (w > maxDim * 2 || h > maxDim * 2) {
+        val desiredW = if (targetW > 0) targetW else maxDim
+        val desiredH = if (targetH > 0) targetH else maxDim
+        while (w > desiredW * 2 || h > desiredH * 2) {
             sampleSize *= 2
             w /= 2
             h /= 2
@@ -146,12 +164,22 @@ internal class UgoiraInterceptor : Interceptor {
         }
         val decoded = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, decodeOpts) ?: return null
 
-        // If still exceeds maxDim, scale smoothly
-        if (decoded.width > maxDim || decoded.height > maxDim) {
+        val finalW: Int
+        val finalH: Int
+        if (targetW > 0 && targetH > 0) {
+            finalW = targetW
+            finalH = targetH
+        } else if (decoded.width > maxDim || decoded.height > maxDim) {
             val scale = maxDim.toFloat() / maxOf(decoded.width, decoded.height)
-            val targetW = (decoded.width * scale).toInt().coerceAtLeast(1)
-            val targetH = (decoded.height * scale).toInt().coerceAtLeast(1)
-            val scaled = Bitmap.createScaledBitmap(decoded, targetW, targetH, true)
+            finalW = (decoded.width * scale).toInt().coerceAtLeast(1)
+            finalH = (decoded.height * scale).toInt().coerceAtLeast(1)
+        } else {
+            finalW = decoded.width
+            finalH = decoded.height
+        }
+
+        if (decoded.width != finalW || decoded.height != finalH) {
+            val scaled = Bitmap.createScaledBitmap(decoded, finalW, finalH, true)
             if (scaled != decoded) decoded.recycle()
             return scaled
         }
@@ -186,12 +214,16 @@ internal class UgoiraInterceptor : Interceptor {
 
     private fun buildGifResponse(request: Request, file: File): Response {
         val mediaType = "image/gif".toMediaType()
-        val responseBody = file.source().buffer().asResponseBody(mediaType, file.length())
+        val fileLength = file.length()
+        val responseBody = file.source().buffer().asResponseBody(mediaType, fileLength)
         return Response.Builder()
             .request(request)
             .protocol(Protocol.HTTP_1_1)
             .code(200)
             .message("OK")
+            .header("Content-Type", "image/gif")
+            .header("Content-Length", fileLength.toString())
+            .header("Cache-Control", "no-transform")
             .body(responseBody)
             .build()
     }

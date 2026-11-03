@@ -160,6 +160,7 @@ class DeviantArtApi(
         }
 
         val html = response.body.string()
+        updateCsrfFromHtml(html)
         val document = Jsoup.parse(html, galleryUrl)
 
         val totalDeviations = extractTotalFromHtml(document)
@@ -168,12 +169,32 @@ class DeviantArtApi(
         val description = extractDescription(document, totalDeviations, folderName, ref.isFavourites)
         val canonicalName = extractCanonicalUsername(document, ref.user)
 
+        val ogImage = document.selectFirst("meta[property=og:image]")?.attr("content")
+        val coverCandidate = if (!ogImage.isNullOrBlank() && isArtworkUrl(ogImage)) {
+            ImageSelector.maximizeRendition(ogImage)
+        } else {
+            null
+        }
+
+        val coverUrl = coverCandidate ?: run {
+            try {
+                val firstPage = fetchGalleryJson(ref.user, ref.folderId, ref.isFavourites, offset = 0, limit = 1)
+                firstPage.items.firstOrNull()?.let { firstItem ->
+                    val images = fetchDeviationImages(firstItem.path, QualityMode.STANDARD)
+                    images.firstOrNull()?.let { ImageSelector.maximizeRendition(it) }
+                }
+            } catch (_: Exception) {
+                null
+            }
+        }
+
         val profile = ArtistProfile(
             username = canonicalName,
             totalDeviations = totalDeviations,
             avatarUrl = avatarUrl,
             description = description,
             folderName = folderName,
+            coverUrl = coverUrl,
         )
 
         profileCache[key] = Pair(profile, now)
@@ -353,6 +374,14 @@ class DeviantArtApi(
 
     private var csrf: String? = null
 
+    fun updateCsrfFromHtml(html: String) {
+        val t = Regex("""__CSRF_TOKEN__\s*=\s*'([^']+)'""").find(html)?.groupValues?.get(1)
+            ?: Regex(""""csrf_token"\s*:\s*"([^"]+)"""").find(html)?.groupValues?.get(1)
+        if (t != null && t.isNotBlank()) {
+            csrf = t
+        }
+    }
+
     fun csrfToken(force: Boolean = false): String {
         csrf?.takeIf { !force }?.let { return it }
         val html = HttpGuard.executeWithRetry("csrf", debugLog) {
@@ -370,7 +399,7 @@ class DeviantArtApi(
         folderId: String?,
         isFavourites: Boolean = false,
         offset: Int = 0,
-        limit: Int = 24,
+        limit: Int = 60,
     ): RssPageResult {
         fun call(force: Boolean): String {
             val type = if (isFavourites) "collection" else "gallery"
@@ -399,6 +428,11 @@ class DeviantArtApi(
         }
 
         val root = json.parseToJsonElement(body).jsonObject
+        val error = root["error"]?.jsonPrimitive?.contentOrNull ?: root["errorDescription"]?.jsonPrimitive?.contentOrNull
+        if (error != null && !error.equals("success", ignoreCase = true)) {
+            throw IOException("DeviantArt gallery error: $error")
+        }
+
         val raw = root["results"]?.jsonArray.orEmpty()
         val items = raw.mapNotNull { el ->
             val obj = el.jsonObject
@@ -503,24 +537,109 @@ class DeviantArtApi(
     }
 
     fun extractDeviationMediaFromHtml(html: String, devId: String): Pair<Media?, List<Media>> {
+        var primary: Media? = null
+        val additional = mutableListOf<Media>()
+
+        // 1. Extract from window.__INITIAL_STATE__
         try {
             val marker = "window.__INITIAL_STATE__ = JSON.parse(\""
             val start = html.indexOf(marker)
             if (start != -1) {
                 val startIdx = start + marker.length
-                val endIdx = html.indexOf("\");", startIdx).takeIf { it > startIdx } ?: html.length
+                var endIdx = html.indexOf("\");\n", startIdx)
+                if (endIdx == -1) endIdx = html.indexOf("\");\r\n", startIdx)
+                if (endIdx == -1) endIdx = html.indexOf("\");window.__", startIdx)
+                if (endIdx == -1) endIdx = html.indexOf("\");", startIdx).takeIf { it > startIdx } ?: html.length
+
                 val escaped = html.substring(startIdx, endIdx).replace("\\'", "'")
                 val rawJson = json.decodeFromString<String>("\"$escaped\"")
                 val root = json.parseToJsonElement(rawJson).jsonObject
                 val devObj = root["@@entities"]?.jsonObject?.get("deviation")?.jsonObject?.get(devId)?.jsonObject
                 if (devObj != null) {
-                    val primary = parseMedia(devObj["media"])
-                    val additional = devObj["additionalMedia"]?.jsonArray?.mapNotNull { parseMedia(it) }.orEmpty()
-                    return Pair(primary, additional)
+                    primary = parseMedia(devObj["media"])
+                    val extra = devObj["additionalMedia"]?.jsonArray?.mapNotNull { parseMedia(it) }.orEmpty()
+                    additional.addAll(extra)
+                    if (primary != null) {
+                        return Pair(primary, additional)
+                    }
                 }
             }
         } catch (_: Exception) {}
-        return Pair(null, emptyList())
+
+        // 2. Direct substring extraction fallback (resilient against state parser crashes)
+        try {
+            val devToken = "\"$devId\":"
+            val devTokenEsc = "\\\"$devId\\\":"
+            var devPos = html.indexOf(devTokenEsc)
+            if (devPos == -1) devPos = html.indexOf(devToken)
+
+            if (devPos != -1) {
+                if (primary == null) {
+                    val mediaMarker = "\\\"media\\\":{"
+                    val mediaMarkerUnesc = "\"media\":{"
+                    var mPos = html.indexOf(mediaMarker, devPos)
+                    var prefixLen = mediaMarker.length
+                    if (mPos == -1 || mPos > devPos + 15000) {
+                        mPos = html.indexOf(mediaMarkerUnesc, devPos)
+                        prefixLen = mediaMarkerUnesc.length
+                    }
+                    if (mPos != -1 && mPos < devPos + 15000) {
+                        var open = 1
+                        var endM = -1
+                        for (i in (mPos + prefixLen) until minOf(html.length, mPos + 10000)) {
+                            if (html[i] == '{') {
+                                open++
+                            } else if (html[i] == '}') {
+                                open--
+                                if (open == 0) {
+                                    endM = i + 1
+                                    break
+                                }
+                            }
+                        }
+                        if (endM != -1) {
+                            val rawM = html.substring(mPos + prefixLen - 1, endM)
+                            val unescaped = rawM.replace("\\\"", "\"").replace("\\'", "'").replace("\\/", "/").replace("\\\\", "\\")
+                            val el = json.parseToJsonElement(unescaped)
+                            primary = parseMedia(el)
+                        }
+                    }
+                }
+
+                val addMarker = "\\\"additionalMedia\\\":["
+                val addMarkerUnesc = "\"additionalMedia\":["
+                var aPos = html.indexOf(addMarker, devPos)
+                var aPrefixLen = addMarker.length
+                if (aPos == -1 || aPos > devPos + 25000) {
+                    aPos = html.indexOf(addMarkerUnesc, devPos)
+                    aPrefixLen = addMarkerUnesc.length
+                }
+                if (aPos != -1 && aPos < devPos + 25000) {
+                    var open = 1
+                    var endA = -1
+                    for (i in (aPos + aPrefixLen) until minOf(html.length, aPos + 30000)) {
+                        if (html[i] == '[') {
+                            open++
+                        } else if (html[i] == ']') {
+                            open--
+                            if (open == 0) {
+                                endA = i + 1
+                                break
+                            }
+                        }
+                    }
+                    if (endA != -1) {
+                        val rawA = html.substring(aPos + aPrefixLen - 1, endA)
+                        val unescaped = rawA.replace("\\\"", "\"").replace("\\'", "'").replace("\\/", "/").replace("\\\\", "\\")
+                        val arr = json.parseToJsonElement(unescaped).jsonArray
+                        val parsed = arr.mapNotNull { parseMedia(it) }
+                        additional.addAll(parsed)
+                    }
+                }
+            }
+        } catch (_: Exception) {}
+
+        return Pair(primary, additional)
     }
 
     fun fetchArtworkDescription(relativeOrFullUrl: String): ArtworkDescription? {
@@ -552,6 +671,7 @@ class DeviantArtApi(
         html: String,
         relativeUrl: String,
     ): ArtworkDescription? {
+        updateCsrfFromHtml(html)
         val defaultAuthor = relativeUrl.removePrefix("/").substringBefore("/art/").substringBefore("/")
         val defaultTitle = relativeUrl.substringAfter("/art/").substringBeforeLast("-").replace("-", " ").ifBlank { "Artwork" }
 
@@ -578,7 +698,7 @@ class DeviantArtApi(
             ?: doc.selectFirst(".legacy-journal")
             ?: doc.selectFirst("[data-hook=art_stage] + div")
 
-        var rawText = descEl?.let { descriptionToText(it.html()) }.orEmpty()
+        var rawText = descEl?.let { cleanDescriptionHtml(it.html()) }.orEmpty()
 
         // 2. Fallback to meta tags if DOM had no description
         if (rawText.isBlank()) {
@@ -594,7 +714,7 @@ class DeviantArtApi(
                 if (pubIdx != -1) {
                     cleaned = cleaned.substring(0, pubIdx).trim()
                 }
-                rawText = descriptionToText(cleaned)
+                rawText = cleanDescriptionHtml(cleaned)
             }
         }
 
