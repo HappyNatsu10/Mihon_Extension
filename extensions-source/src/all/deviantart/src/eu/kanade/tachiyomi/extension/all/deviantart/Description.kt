@@ -204,13 +204,29 @@ fun extractTextOrHtmlFromDraftOrTiptap(raw: String): String {
                             if ("link" in marks) styled = "<font color=\"#0570e6\"><u>$styled</u></font>"
                             sb.append(styled)
                         }
-                        "image" -> {
-                            val src = node["attrs"]?.jsonObject?.get("src")?.jsonPrimitive?.contentOrNull
-                                ?: node["attrs"]?.jsonObject?.get("url")?.jsonPrimitive?.contentOrNull
+                        "image", "media", "deviation", "embed" -> {
+                            val attrs = node["attrs"]?.jsonObject
+                            val src = attrs?.get("src")?.jsonPrimitive?.contentOrNull
+                                ?: attrs?.get("url")?.jsonPrimitive?.contentOrNull
+                                ?: attrs?.get("originalUrl")?.jsonPrimitive?.contentOrNull
+                                ?: attrs?.get("downloadUrl")?.jsonPrimitive?.contentOrNull
                             if (!src.isNullOrBlank()) {
                                 sb.append("<p><img src=\"$src\"/></p>")
                             }
                         }
+                        "heading" -> {
+                            val level = node["attrs"]?.jsonObject?.get("level")?.jsonPrimitive?.intOrNull ?: 1
+                            val tag = if (level == 1) "h1" else "h2"
+                            sb.append("<$tag>")
+                            node["content"]?.jsonArray?.forEach { walk(it) }
+                            sb.append("</$tag>")
+                        }
+                        "blockquote" -> {
+                            sb.append("<blockquote>")
+                            node["content"]?.jsonArray?.forEach { walk(it) }
+                            sb.append("</blockquote>")
+                        }
+                        "horizontalRule" -> sb.append("<hr/>")
                         "hardBreak" -> sb.append("<br/>")
                         "paragraph" -> {
                             val startLen = sb.length
@@ -273,8 +289,31 @@ fun cleanDescriptionHtml(html: String): String {
     val doc = Jsoup.parseBodyFragment(content)
     doc.select("script, style, h2").remove()
 
+    // Normalize image sources from lazy-loading attributes
+    for (img in doc.select("img")) {
+        val realSrc = img.attr("data-src").takeIf { it.isNotBlank() }
+            ?: img.attr("data-orig-src").takeIf { it.isNotBlank() }
+            ?: img.attr("src")
+        if (!realSrc.isNullOrBlank()) {
+            img.attr("src", realSrc)
+        }
+    }
+
+    // Preserve images inside links and format link text with DeviantArt blue underline
     for (a in doc.select("a")) {
-        a.replaceWith(TextNode(a.text()))
+        val imgs = a.select("img")
+        for (img in imgs) {
+            a.before(img)
+        }
+        val text = a.text().trim()
+        if (text.isNotBlank()) {
+            val linkFont = org.jsoup.nodes.Element("font")
+                .attr("color", "#0570e6")
+                .append("<u>$text</u>")
+            a.replaceWith(linkFont)
+        } else {
+            a.remove()
+        }
     }
 
     // Clean text nodes from DA shortcodes

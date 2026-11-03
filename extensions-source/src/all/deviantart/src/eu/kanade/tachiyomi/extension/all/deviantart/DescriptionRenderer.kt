@@ -93,7 +93,21 @@ object DescriptionRenderer {
         val textPaint = TextPaint().apply {
             textSize = 40f
         }
-        val charSequence = parseHtmlToCharSequence(desc.text)
+        val imgCount = Regex("""<img\b""", RegexOption.IGNORE_CASE).findAll(desc.text).count()
+        val dummyGetter = if (imgCount > 0) {
+            Html.ImageGetter {
+                try {
+                    android.graphics.drawable.ColorDrawable(Color.TRANSPARENT).apply {
+                        setBounds(0, 0, CONTENT_WIDTH, 600)
+                    }
+                } catch (_: Throwable) {
+                    null
+                }
+            }
+        } else {
+            null
+        }
+        val charSequence = parseHtmlToCharSequence(desc.text, dummyGetter)
         val layout = try {
             StaticLayout.Builder.obtain(charSequence, 0, charSequence.length, textPaint, CONTENT_WIDTH)
                 .setAlignment(Layout.Alignment.ALIGN_NORMAL)
@@ -165,12 +179,19 @@ object DescriptionRenderer {
                         if (origBmp != null) {
                             val origW = origBmp.width
                             val origH = origBmp.height
-                            val targetW = if (origW > CONTENT_WIDTH) CONTENT_WIDTH else origW
-                            val targetH = (origH.toLong() * targetW / origW).toInt()
-                            val scaled = Bitmap.createScaledBitmap(origBmp, targetW, targetH, true)
-                            if (scaled != origBmp) origBmp.recycle()
-                            BitmapDrawable(null, scaled).apply {
-                                setBounds(0, 0, targetW, targetH)
+                            if (origW > 0 && origH > 0) {
+                                val targetW = if (origW > CONTENT_WIDTH) CONTENT_WIDTH else origW
+                                var targetH = ((origH.toLong() * targetW) / origW).toInt().coerceAtLeast(1)
+                                val maxH = MAX_PAGE_HEIGHT - (MARGIN * 2) - 100
+                                val finalW = if (targetH > maxH) ((targetW.toLong() * maxH) / targetH).toInt().coerceAtLeast(1) else targetW
+                                val finalH = if (targetH > maxH) maxH else targetH
+                                val scaled = Bitmap.createScaledBitmap(origBmp, finalW, finalH, true)
+                                if (scaled != origBmp) origBmp.recycle()
+                                BitmapDrawable(null, scaled).apply {
+                                    setBounds(0, 0, finalW, finalH)
+                                }
+                            } else {
+                                null
                             }
                         } else {
                             null

@@ -400,6 +400,7 @@ class DeviantArtApi(
         isFavourites: Boolean = false,
         offset: Int = 0,
         limit: Int = 60,
+        hidePaywalled: Boolean = false,
     ): RssPageResult {
         fun call(force: Boolean): String {
             val type = if (isFavourites) "collection" else "gallery"
@@ -437,6 +438,7 @@ class DeviantArtApi(
         val items = raw.mapNotNull { el ->
             val obj = el.jsonObject
             val dev = (obj["deviation"] as? JsonObject) ?: obj
+            if (hidePaywalled && isPaywalled(dev)) return@mapNotNull null
             val id = dev["deviationId"]?.jsonPrimitive?.longOrNull ?: return@mapNotNull null
             val link = dev["url"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
             val publishedTime = dev["publishedTime"]?.jsonPrimitive?.contentOrNull
@@ -459,6 +461,38 @@ class DeviantArtApi(
         val next = root["nextOffset"]?.jsonPrimitive?.intOrNull
         val hasMore = root["hasMore"]?.jsonPrimitive?.booleanOrNull ?: false
         return RssPageResult(items, next?.let { "$WEB_BASE_URL/?offset=$it" }, hasMore)
+    }
+
+    fun isPaywalled(dev: JsonObject): Boolean {
+        if (dev["isLocked"]?.jsonPrimitive?.booleanOrNull == true) return true
+        if (dev["isPaidContent"]?.jsonPrimitive?.booleanOrNull == true) return true
+        val tier = dev["tier"]
+        if (tier != null && tier !is kotlinx.serialization.json.JsonNull) return true
+        val premiumFolder = dev["premiumFolderData"]
+        if (premiumFolder != null && premiumFolder !is kotlinx.serialization.json.JsonNull) return true
+
+        val blockReasons = dev["blockReasons"]?.jsonArray?.mapNotNull { it.jsonPrimitive.contentOrNull }.orEmpty()
+        if (blockReasons.any { r ->
+                r.contains("tier", ignoreCase = true) ||
+                    r.contains("sub", ignoreCase = true) ||
+                    r.contains("pay", ignoreCase = true) ||
+                    r.contains("lock", ignoreCase = true)
+            }
+        ) {
+            return true
+        }
+
+        val mediaObj = dev["media"] as? JsonObject
+        val types = mediaObj?.get("types")?.jsonArray
+        val hasViewable = types != null && types.isNotEmpty() && types.any {
+            val t = (it as? JsonObject)?.get("t")?.jsonPrimitive?.contentOrNull
+            t == "fullview" || t == "preview"
+        }
+        if (dev["isPurchasable"]?.jsonPrimitive?.booleanOrNull == true && !hasViewable) {
+            return true
+        }
+
+        return false
     }
 
     private val qualityRegex = Regex(",q_\\d+")
@@ -684,11 +718,21 @@ class DeviantArtApi(
         // 1. Extract from window.__INITIAL_STATE__
         try {
             val root = extractInitialStateJson(html)
-            val devObj = root?.get("@@entities")?.jsonObject?.get("deviation")?.jsonObject?.get(devId)?.jsonObject
+            val entities = root?.get("@@entities")?.jsonObject
+            val devObj = entities?.get("deviation")?.jsonObject?.get(devId)?.jsonObject
+            val extObj = entities?.get("deviationExtended")?.jsonObject?.get(devId)?.jsonObject
             if (devObj != null) {
                 primary = parseMedia(devObj["media"])
-                val extra = devObj["additionalMedia"]?.jsonArray?.mapNotNull { parseMedia(it) }.orEmpty()
-                additional.addAll(extra)
+                val extraJson = extObj?.get("additionalMedia")?.jsonArray
+                    ?: devObj["extended"]?.jsonObject?.get("additionalMedia")?.jsonArray
+                    ?: devObj["additionalMedia"]?.jsonArray
+                if (extraJson != null) {
+                    val sorted = extraJson.mapNotNull { it as? JsonObject }.sortedBy {
+                        it["position"]?.jsonPrimitive?.intOrNull ?: 0
+                    }
+                    val extra = sorted.mapNotNull { parseMedia(it) }
+                    additional.addAll(extra)
+                }
                 if (primary != null) {
                     return Pair(primary, additional)
                 }
@@ -735,34 +779,39 @@ class DeviantArtApi(
                     }
                 }
 
-                val addMarker = "\\\"additionalMedia\\\":["
-                val addMarkerUnesc = "\"additionalMedia\":["
-                var aPos = html.indexOf(addMarker, devPos)
-                var aPrefixLen = addMarker.length
-                if (aPos == -1 || aPos > devPos + 25000) {
-                    aPos = html.indexOf(addMarkerUnesc, devPos)
-                    aPrefixLen = addMarkerUnesc.length
-                }
-                if (aPos != -1 && aPos < devPos + 25000) {
-                    var open = 1
-                    var endA = -1
-                    for (i in (aPos + aPrefixLen) until minOf(html.length, aPos + 30000)) {
-                        if (html[i] == '[') {
-                            open++
-                        } else if (html[i] == ']') {
-                            open--
-                            if (open == 0) {
-                                endA = i + 1
-                                break
+                if (additional.isEmpty()) {
+                    val addMarker = "\\\"additionalMedia\\\":["
+                    val addMarkerUnesc = "\"additionalMedia\":["
+                    var aPos = html.indexOf(addMarker)
+                    var aPrefixLen = addMarker.length
+                    if (aPos == -1) {
+                        aPos = html.indexOf(addMarkerUnesc)
+                        aPrefixLen = addMarkerUnesc.length
+                    }
+                    if (aPos != -1) {
+                        var open = 1
+                        var endA = -1
+                        for (i in (aPos + aPrefixLen) until minOf(html.length, aPos + 60000)) {
+                            if (html[i] == '[') {
+                                open++
+                            } else if (html[i] == ']') {
+                                open--
+                                if (open == 0) {
+                                    endA = i + 1
+                                    break
+                                }
                             }
                         }
-                    }
-                    if (endA != -1) {
-                        val rawA = html.substring(aPos + aPrefixLen - 1, endA)
-                        val unescaped = rawA.replace("\\\"", "\"").replace("\\'", "'").replace("\\/", "/").replace("\\\\", "\\")
-                        val arr = json.parseToJsonElement(unescaped).jsonArray
-                        val parsed = arr.mapNotNull { parseMedia(it) }
-                        additional.addAll(parsed)
+                        if (endA != -1) {
+                            val rawA = html.substring(aPos + aPrefixLen - 1, endA)
+                            val unescaped = rawA.replace("\\\"", "\"").replace("\\'", "'").replace("\\/", "/").replace("\\\\", "\\")
+                            val arr = json.parseToJsonElement(unescaped).jsonArray
+                            val sorted = arr.mapNotNull { it as? JsonObject }.sortedBy {
+                                it["position"]?.jsonPrimitive?.intOrNull ?: 0
+                            }
+                            val parsed = sorted.mapNotNull { parseMedia(it) }
+                            additional.addAll(parsed)
+                        }
                     }
                 }
             }
@@ -988,6 +1037,17 @@ class DeviantArtApi(
         if (resultPages.isNotEmpty()) {
             return resultPages
         }
+
+        // Check if locked behind paywall without viewable pages
+        try {
+            val root = extractInitialStateJson(html)
+            val devObj = root?.get("@@entities")?.jsonObject?.get("deviation")?.jsonObject?.get(devId)?.jsonObject
+            if (devObj != null && isPaywalled(devObj)) {
+                throw IOException("This artwork is locked behind a paywall (subscription/tier).")
+            }
+        } catch (e: IOException) {
+            throw e
+        } catch (_: Exception) {}
 
         // 5. Fallback candidate collection if media JSON was missing
         val candidates = mutableListOf<CandidateRendition>()

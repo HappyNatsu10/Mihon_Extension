@@ -187,7 +187,68 @@ class DeviantArtApiTest {
         org.junit.Assert.assertTrue(cleaned.contains("<b>World</b>"))
         org.junit.Assert.assertTrue(cleaned.contains("<i>Welcome</i>"))
         org.junit.Assert.assertTrue(cleaned.contains("<img src=\"https://example.com/banner.png\""))
-        org.junit.Assert.assertTrue(cleaned.contains("Art by Author"))
-        org.junit.Assert.assertFalse(cleaned.contains("https://example.com/artist"))
+        org.junit.Assert.assertTrue(cleaned.contains("Author"))
+        org.junit.Assert.assertTrue(cleaned.contains("#0570e6"))
+    }
+
+    @Test
+    fun testExtractAdditionalMediaFromDeviationExtended() {
+        val api = DeviantArtApi(OkHttpClient())
+        // DeviantArt puts primary in deviation and additionalMedia in deviationExtended!
+        val html = """
+            <!DOCTYPE html>
+            <html>
+            <script>
+            window.__INITIAL_STATE__ = JSON.parse("{\"@@entities\":{\"deviation\":{\"1258128980\":{\"deviationId\":1258128980,\"media\":{\"baseUri\":\"https:\\/\\/images-wixmp.com\\/f\\/page0.png\",\"prettyName\":\"p0\",\"token\":[\"tok0\"],\"types\":[{\"t\":\"fullview\",\"c\":\"\\/v1\\/fill\\/<prettyName>.png\"}]}}},\"deviationExtended\":{\"1258128980\":{\"deviationId\":1258128980,\"additionalMedia\":[{\"position\":1,\"media\":{\"baseUri\":\"https:\\/\\/images-wixmp.com\\/f\\/page1.png\",\"prettyName\":\"p1\",\"token\":[\"tok1\"],\"types\":[{\"t\":\"fullview\",\"c\":\"\\/v1\\/fill\\/<prettyName>.png\"}]}},{\"position\":2,\"media\":{\"baseUri\":\"https:\\/\\/images-wixmp.com\\/f\\/page2.png\",\"prettyName\":\"p2\",\"token\":[\"tok2\"],\"types\":[{\"t\":\"fullview\",\"c\":\"\\/v1\\/fill\\/<prettyName>.png\"}]}}]}}}}");
+            </script>
+            </html>
+        """.trimIndent()
+
+        val (primary, additional) = api.extractDeviationMediaFromHtml(html, "1258128980")
+        org.junit.Assert.assertNotNull(primary)
+        assertEquals("https://images-wixmp.com/f/page0.png", primary!!.baseUri)
+        assertEquals(2, additional.size)
+        assertEquals("https://images-wixmp.com/f/page1.png", additional[0].baseUri)
+        assertEquals("https://images-wixmp.com/f/page2.png", additional[1].baseUri)
+    }
+
+    @Test
+    fun testCleanDescriptionHtmlHoistsImagesInsideLinks() {
+        val html = """
+            <p>Check out my art: <a href="https://www.deviantart.com/art/123"><img src="https://example.com/art.png" alt="Art"/></a></p>
+        """.trimIndent()
+
+        val cleaned = cleanDescriptionHtml(html)
+        org.junit.Assert.assertTrue(cleaned.contains("<img src=\"https://example.com/art.png\""))
+    }
+
+    @Test
+    fun testIsPaywalledDetection() {
+        val api = DeviantArtApi(OkHttpClient())
+
+        // 1. Paywalled: tier locked
+        val tierLocked = json.parseToJsonElement("""{"isLocked": true, "tier": {"tierId": 123}}""").let {
+            api.isPaywalled(it as kotlinx.serialization.json.JsonObject)
+        }
+        org.junit.Assert.assertTrue(tierLocked)
+
+        // 2. Paywalled: premium folder
+        val premiumFolderLocked = json.parseToJsonElement("""{"premiumFolderData": {"type": "premium"}}""").let {
+            api.isPaywalled(it as kotlinx.serialization.json.JsonObject)
+        }
+        org.junit.Assert.assertTrue(premiumFolderLocked)
+
+        // 3. Purchasable for download/print BUT has public fullview preview -> NOT paywalled!
+        val purchasableWithFullview = json.parseToJsonElement("""
+            {
+                "isPurchasable": true,
+                "media": {
+                    "types": [{"t": "fullview", "c": "/test.png"}]
+                }
+            }
+        """.trimIndent()).let {
+            api.isPaywalled(it as kotlinx.serialization.json.JsonObject)
+        }
+        org.junit.Assert.assertFalse(purchasableWithFullview)
     }
 }

@@ -53,9 +53,9 @@ abstract class DeviantArt :
 
     // ============================== Browse (Popular & Latest) ==================
 
-    override suspend fun getPopularManga(page: Int): MangasPage = feeds.popular(page)
+    override suspend fun getPopularManga(page: Int): MangasPage = feeds.popular(page, preferences.hidePaywalled)
 
-    override suspend fun getLatestUpdates(page: Int): MangasPage = feeds.latest(page)
+    override suspend fun getLatestUpdates(page: Int): MangasPage = feeds.latest(page, preferences.hidePaywalled)
 
     // ============================== Search & URL Resolution ==================
 
@@ -97,17 +97,19 @@ abstract class DeviantArt :
         val feedFilter = filters.filterIsInstance<FeedFilter>().firstOrNull()
         val sortFilter = filters.filterIsInstance<SortFilter>().firstOrNull()
         val isSortNewest = sortFilter?.state == 1
+        val paywallFilter = filters.filterIsInstance<PaywallFilter>().firstOrNull()
+        val hidePaywalled = paywallFilter?.state ?: preferences.hidePaywalled
 
         // 1. Followed feed trigger (FR-7)
         if (trimmedQuery.equals("feed:followed", ignoreCase = true) || feedFilter?.state == 2) {
-            return feeds.followed(page)
+            return feeds.followed(page, hidePaywalled)
         }
 
         // 2. Empty query: return selected feed (Popular or Latest)
         if (trimmedQuery.isEmpty()) {
             return when (feedFilter?.state) {
-                1 -> feeds.latest(page)
-                else -> feeds.popular(page)
+                1 -> feeds.latest(page, hidePaywalled)
+                else -> feeds.popular(page, hidePaywalled)
             }
         }
 
@@ -122,7 +124,7 @@ abstract class DeviantArt :
         }
 
         // 4. Keyword search on DeviantArt
-        return feeds.search(trimmedQuery, page, sortByNewest = isSortNewest)
+        return feeds.search(trimmedQuery, page, sortByNewest = isSortNewest, hidePaywalled = hidePaywalled)
     }
 
     private fun resolveToMangas(resolved: Resolved): List<SManga> = when (resolved) {
@@ -318,7 +320,7 @@ abstract class DeviantArt :
                         api.fetchRssPageResult(ref.user, ref.folderId, ref.isFavourites, offset)
                     } else {
                         try {
-                            api.fetchGalleryJson(ref.user, ref.folderId, ref.isFavourites, offset, limit = 60)
+                            api.fetchGalleryJson(ref.user, ref.folderId, ref.isFavourites, offset, limit = 60, hidePaywalled = preferences.hidePaywalled)
                         } catch (e: Exception) {
                             useRss = true
                             api.fetchRssPageResult(ref.user, ref.folderId, ref.isFavourites, offset)
@@ -410,6 +412,7 @@ abstract class DeviantArt :
         Filter.Separator(),
         FeedFilter(),
         SortFilter(),
+        PaywallFilter(preferences.hidePaywalled),
     )
 
     private class FeedFilter :
@@ -423,6 +426,8 @@ abstract class DeviantArt :
             "Sort",
             arrayOf("Popular", "Newest"),
         )
+
+    private class PaywallFilter(defaultState: Boolean = false) : Filter.CheckBox("Hide paywalled deviations", defaultState)
 
     // ============================== Settings ===================================
 
@@ -451,6 +456,14 @@ abstract class DeviantArt :
         }
         screen.addPreference(imageQualityPref)
 
+        val hidePaywalledPref = SwitchPreferenceCompat(screen.context).apply {
+            key = PREF_HIDE_PAYWALLED_KEY
+            title = "Hide paywalled deviations"
+            summary = "Filter out deviations that require a subscription, tier, or payment just to view."
+            setDefaultValue(false)
+        }
+        screen.addPreference(hidePaywalledPref)
+
         val debugLogPref = SwitchPreferenceCompat(screen.context).apply {
             key = PREF_DEBUG_LOG_KEY
             title = "Enable diagnostic debug logging"
@@ -470,10 +483,10 @@ abstract class DeviantArt :
         val descriptionMaxPagesPref = ListPreference(screen.context).apply {
             key = PREF_DESCRIPTION_MAX_PAGES_KEY
             title = "Maximum description pages"
-            entries = arrayOf("1 page", "2 pages", "3 pages (Default)", "4 pages", "5 pages", "6 pages")
-            entryValues = arrayOf("1", "2", "3", "4", "5", "6")
+            entries = arrayOf("1 page", "2 pages", "3 pages", "5 pages", "10 pages (Default)", "15 pages", "20 pages", "30 pages", "50 pages")
+            entryValues = arrayOf("1", "2", "3", "5", "10", "15", "20", "30", "50")
             summary = "Current: %s"
-            setDefaultValue("3")
+            setDefaultValue("10")
         }
         screen.addPreference(descriptionMaxPagesPref)
 
@@ -515,6 +528,9 @@ abstract class DeviantArt :
             }
         }
 
+    private val SharedPreferences.hidePaywalled: Boolean
+        get() = getBoolean(PREF_HIDE_PAYWALLED_KEY, false)
+
     private val SharedPreferences.debugLog: Boolean
         get() = getBoolean(PREF_DEBUG_LOG_KEY, false)
 
@@ -522,11 +538,12 @@ abstract class DeviantArt :
         get() = getBoolean(PREF_SHOW_DESCRIPTION_KEY, true)
 
     private val SharedPreferences.descriptionMaxPages: Int
-        get() = getString(PREF_DESCRIPTION_MAX_PAGES_KEY, "3")?.toIntOrNull()?.coerceIn(1, 6) ?: 3
+        get() = getString(PREF_DESCRIPTION_MAX_PAGES_KEY, "10")?.toIntOrNull()?.coerceIn(1, 50) ?: 10
 
     companion object {
         private const val PREF_CHAPTER_MODE_KEY = "chapter_mode"
         private const val PREF_IMAGE_QUALITY_KEY = "image_quality"
+        private const val PREF_HIDE_PAYWALLED_KEY = "hide_paywalled"
         private const val PREF_DEBUG_LOG_KEY = "debug_log"
         private const val PREF_SHOW_DESCRIPTION_KEY = "show_description"
         private const val PREF_DESCRIPTION_MAX_PAGES_KEY = "description_max_pages"

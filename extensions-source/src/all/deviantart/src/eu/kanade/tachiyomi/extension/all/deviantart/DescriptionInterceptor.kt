@@ -8,12 +8,20 @@ import okhttp3.Request
 import okhttp3.Response
 import okhttp3.ResponseBody.Companion.toResponseBody
 import java.io.IOException
+import java.util.Collections
+import java.util.LinkedHashMap
 
 class DescriptionInterceptor(
     private val clientProvider: () -> OkHttpClient,
     private val fetchFallback: (devId: String) -> ArtworkDescription?,
-    private val maxPagesProvider: () -> Int = { 3 },
+    private val maxPagesProvider: () -> Int = { 10 },
 ) : Interceptor {
+
+    private val imageBytesCache = Collections.synchronizedMap(
+        object : LinkedHashMap<String, ByteArray>(30, 0.75f, true) {
+            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, ByteArray>?): Boolean = size > 30
+        },
+    )
 
     override fun intercept(chain: Interceptor.Chain): Response {
         val request = chain.request()
@@ -45,21 +53,43 @@ class DescriptionInterceptor(
             throw IOException("Could not load the artwork description")
         }
 
-        val fetchImage: (String) -> ByteArray? = { imgUrl ->
-            try {
-                val imgReq = Request.Builder()
-                    .url(imgUrl)
-                    .header("Referer", "https://www.deviantart.com/")
-                    .build()
-                val imgResp = clientProvider().newCall(imgReq).execute()
-                if (imgResp.isSuccessful) {
-                    imgResp.body.bytes()
-                } else {
-                    imgResp.close()
+        val fetchImage: (String) -> ByteArray? = { rawUrl ->
+            val imgUrl = rawUrl.trim()
+            val cached = imageBytesCache[imgUrl]
+            if (cached != null) {
+                cached
+            } else {
+                try {
+                    val resolvedUrl = when {
+                        imgUrl.startsWith("//") -> "https:$imgUrl"
+                        imgUrl.startsWith("/") -> "https://www.deviantart.com$imgUrl"
+                        else -> imgUrl
+                    }
+                    if (resolvedUrl.startsWith("data:")) {
+                        val base64 = resolvedUrl.substringAfter("base64,")
+                        val bytes = android.util.Base64.decode(base64, android.util.Base64.DEFAULT)
+                        imageBytesCache[imgUrl] = bytes
+                        bytes
+                    } else {
+                        val imgReq = Request.Builder()
+                            .url(resolvedUrl)
+                            .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
+                            .header("Referer", "https://www.deviantart.com/")
+                            .header("Accept", "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8")
+                            .build()
+                        val imgResp = clientProvider().newCall(imgReq).execute()
+                        if (imgResp.isSuccessful) {
+                            val bytes = imgResp.body.bytes()
+                            imageBytesCache[imgUrl] = bytes
+                            bytes
+                        } else {
+                            imgResp.close()
+                            null
+                        }
+                    }
+                } catch (_: Exception) {
                     null
                 }
-            } catch (_: Exception) {
-                null
             }
         }
 

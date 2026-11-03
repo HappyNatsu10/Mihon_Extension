@@ -38,7 +38,7 @@ class Feeds(
     /**
      * Popular feed: backed by DeviantArt backend RSS feed.
      */
-    fun popular(page: Int): MangasPage {
+    fun popular(page: Int, hidePaywalled: Boolean = false): MangasPage {
         val offset = (page - 1) * FEED_PAGE_SIZE
         val url = backendBaseUrl.toHttpUrl().newBuilder()
             .addPathSegment("rss.xml")
@@ -52,12 +52,12 @@ class Feeds(
      * Latest feed: returns the user's home feed (what they see when opening DeviantArt),
      * personalized if logged in, or the recommended feed if logged out.
      */
-    fun latest(page: Int): MangasPage = try {
-        fetchNetworkbarFeed("rfy/deviations", page)
+    fun latest(page: Int, hidePaywalled: Boolean = false): MangasPage = try {
+        fetchNetworkbarFeed("rfy/deviations", page, hidePaywalled)
     } catch (e: Exception) {
         if (page == 1) {
             try {
-                fetchHomeHtmlFeed()
+                fetchHomeHtmlFeed(hidePaywalled)
             } catch (_: Exception) {
                 fetchRssLatest(page)
             }
@@ -71,13 +71,13 @@ class Feeds(
      * Requires authentication. If logged out, throws a clear login prompt.
      * If following nobody or no deviations, returns an empty list without error.
      */
-    fun followed(page: Int): MangasPage {
+    fun followed(page: Int, hidePaywalled: Boolean = false): MangasPage {
         if (!isLoggedIn()) {
             throw IOException(LOGIN_REQUIRED_MESSAGE)
         }
 
         return try {
-            fetchNetworkbarFeed("dyw/deviations", page)
+            fetchNetworkbarFeed("dyw/deviations", page, hidePaywalled)
         } catch (e: Exception) {
             val msg = e.message.orEmpty()
             if (msg.contains("unauthorized", ignoreCase = true) ||
@@ -95,7 +95,7 @@ class Feeds(
     /**
      * Keyword search backed by backend RSS query.
      */
-    fun search(query: String, page: Int, sortByNewest: Boolean = false): MangasPage {
+    fun search(query: String, page: Int, sortByNewest: Boolean = false, hidePaywalled: Boolean = false): MangasPage {
         val offset = (page - 1) * FEED_PAGE_SIZE
         val q = if (sortByNewest) "sort:time $query" else query
         val url = backendBaseUrl.toHttpUrl().newBuilder()
@@ -122,7 +122,7 @@ class Feeds(
      * Fetches a feed from DeviantArt's web networkbar endpoint (rfy/deviations or dyw/deviations).
      * Handles CSRF refreshing, cursor pagination, and item de-duplication.
      */
-    fun fetchNetworkbarFeed(endpoint: String, page: Int, maxAttempts: Int = 3): MangasPage {
+    fun fetchNetworkbarFeed(endpoint: String, page: Int, hidePaywalled: Boolean = false, maxAttempts: Int = 3): MangasPage {
         var currentAttempt = 0
         var currentPage = page
         val accumulatedMangas = mutableListOf<SManga>()
@@ -179,7 +179,7 @@ class Feeds(
                 throw IOException(LOGIN_REQUIRED_MESSAGE)
             }
 
-            val pageResult = parseNetworkbarJsonWithCursor(body)
+            val pageResult = parseNetworkbarJsonWithCursor(body, hidePaywalled)
             hasMoreResults = pageResult.second || !pageResult.third.isNullOrBlank()
             if (!pageResult.third.isNullOrBlank()) {
                 cursorCache["$endpoint-${currentPage + 1}"] = pageResult.third!!
@@ -203,7 +203,7 @@ class Feeds(
     /**
      * Parses the deviations JSON returned by networkbar endpoints with cursor extraction.
      */
-    fun parseNetworkbarJsonWithCursor(body: String): Triple<List<SManga>, Boolean, String?> {
+    fun parseNetworkbarJsonWithCursor(body: String, hidePaywalled: Boolean = false): Triple<List<SManga>, Boolean, String?> {
         val root = try {
             json.parseToJsonElement(body).jsonObject
         } catch (_: Exception) {
@@ -223,6 +223,7 @@ class Feeds(
         for (el in deviationsArray) {
             val obj = el.jsonObject
             val dev = (obj["deviation"] as? JsonObject) ?: obj
+            if (hidePaywalled && api.isPaywalled(dev)) continue
             val devId = dev["deviationId"]?.jsonPrimitive?.longOrNull ?: continue
             val url = dev["url"]?.jsonPrimitive?.contentOrNull ?: continue
             val title = dev["title"]?.jsonPrimitive?.contentOrNull?.ifBlank { "Artwork" } ?: "Artwork"
@@ -268,7 +269,7 @@ class Feeds(
     /**
      * Secondary fallback: extracts initial deviations from the homepage HTML SSR.
      */
-    fun fetchHomeHtmlFeed(): MangasPage {
+    fun fetchHomeHtmlFeed(hidePaywalled: Boolean = false): MangasPage {
         val req = Request.Builder().url("$baseUrl/").build()
         val response = HttpGuard.executeWithRetry("home html") {
             client.newCall(req).execute()
@@ -287,6 +288,7 @@ class Feeds(
         val mangas = mutableListOf<SManga>()
         for (id in devIds) {
             val dev = devMap[id.toString()]?.jsonObject ?: continue
+            if (hidePaywalled && api.isPaywalled(dev)) continue
             val url = dev["url"]?.jsonPrimitive?.contentOrNull ?: continue
             val title = dev["title"]?.jsonPrimitive?.contentOrNull?.ifBlank { "Artwork" } ?: "Artwork"
             val authorId = dev["author"]?.jsonPrimitive?.contentOrNull
