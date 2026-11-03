@@ -39,6 +39,7 @@ data class GalleryCacheData(
     val schemaVersion: Int = 2,
     val complete: Boolean,
     val items: List<CachedItem>,
+    val nextOffset: Int? = null,
 )
 
 @Serializable
@@ -52,6 +53,20 @@ data class LedgerEntry(
 data class ChapterLedgerData(
     val schemaVersion: Int = 1,
     val entries: MutableMap<String, LedgerEntry> = mutableMapOf(),
+)
+
+data class MediaType(
+    val t: String,
+    val c: String? = null,
+    val h: Int? = null,
+    val w: Int? = null,
+)
+
+data class Media(
+    val baseUri: String?,
+    val prettyName: String?,
+    val token: List<String> = emptyList(),
+    val types: List<MediaType> = emptyList(),
 )
 
 data class ImageDimension(val width: Int, val height: Int)

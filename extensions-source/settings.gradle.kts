@@ -35,6 +35,7 @@ rootProject.name = "Keiyoushi"
  */
 // loadAllIndividualExtensions()
 loadIndividualExtension("all", "deviantart")
+loadIndividualExtension("all", "pixiv")
 
 /**
  * ===================================== COMMON CONFIGURATION ======================================

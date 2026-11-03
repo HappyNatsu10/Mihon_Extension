@@ -43,8 +43,11 @@ object HttpGuard {
         return "DeviantArt returned HTTP $code at $endpointLabel."
     }
 
+    private val HINT_HEADERS = listOf("server", "via", "x-cache", "x-amz-cf-id", "cf-ray", "cf-mitigated", "retry-after")
+
     /**
-     * Executes an HTTP request with retries for 429/403/5xx errors using exponential backoff.
+     * Executes an HTTP request with retries for 429/5xx (and ONE retry for 403) using backoff.
+     * The response body and CDN hint headers are read BEFORE the response is closed.
      */
     fun executeWithRetry(
         endpointLabel: String,
@@ -53,7 +56,9 @@ object HttpGuard {
         callSupplier: () -> Response,
     ): Response {
         var attempt = 0
-        var lastResponse: Response? = null
+        var lastCode = 0
+        var lastSnippet = ""
+        var lastHints = ""
 
         while (attempt < maxRetries) {
             attempt++
@@ -76,38 +81,35 @@ object HttpGuard {
                 return response
             }
 
-            lastResponse = response
-            val code = response.code
+            lastCode = response.code
+            lastSnippet = try {
+                response.peekBody(2048).string()
+            } catch (_: Exception) {
+                ""
+            }
+            lastHints = HINT_HEADERS.mapNotNull { name -> response.header(name)?.let { "$name=$it" } }.joinToString(", ")
+            val retryAfter = response.header("Retry-After")?.toLongOrNull() ?: (attempt * 2L)
+            response.close()
 
-            // Only retry 403, 429, 5xx
-            if (code == 429 || code == 403 || code in 500..599) {
-                val retryAfter = response.header("Retry-After")?.toLongOrNull() ?: (attempt * 1L)
-                if (debugLog) {
-                    Log.w(TAG, "[$endpointLabel] HTTP $code (attempt $attempt), backing off ${retryAfter}s")
-                }
-                response.close()
-                if (attempt < maxRetries) {
-                    try {
-                        Thread.sleep(retryAfter * 1000L)
-                    } catch (_: InterruptedException) {
-                        break
-                    }
-                    continue
-                }
-            } else {
-                // Non-retriable code (e.g. 404)
+            // A 403 from a CDN/WAF is rarely transient: retrying it repeatedly only makes the block worse.
+            val retryable = lastCode == 429 || lastCode in 500..599 || (lastCode == 403 && attempt < 2)
+            if (debugLog) {
+                Log.w(TAG, "[$endpointLabel] HTTP $lastCode (attempt $attempt) hints=[$lastHints] retry=$retryable")
+            }
+            if (!retryable || attempt >= maxRetries) break
+            try {
+                Thread.sleep(retryAfter * 1000L)
+            } catch (_: InterruptedException) {
                 break
             }
         }
 
-        val resp = lastResponse ?: throw IOException("Failed to execute request at $endpointLabel")
-        val bodySnippet = try {
-            resp.peekBody(200).string().replace(TOKEN_REGEX, "token=[REDACTED]")
-        } catch (_: Exception) {
-            ""
+        if (lastCode == 0) throw IOException("Failed to execute request at $endpointLabel")
+        val redacted = lastSnippet.replace(TOKEN_REGEX, "token=[REDACTED]")
+        var message = classifyError(lastCode, redacted, endpointLabel)
+        if (lastCode == 403 && message.contains("unknown cause") && lastHints.isNotEmpty()) {
+            message += " ($lastHints)"
         }
-        val message = classifyError(resp.code, bodySnippet, endpointLabel)
-        resp.close()
         throw IOException(message)
     }
 

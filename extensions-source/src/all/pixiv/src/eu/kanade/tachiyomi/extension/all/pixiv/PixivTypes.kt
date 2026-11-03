@@ -131,3 +131,17 @@ internal class PixivUserInfo(
     val imageBig: String? = null,
     val comment: String? = null,
 )
+
+@Serializable
+internal class PixivUgoiraMeta(
+    val src: String? = null,
+    val originalSrc: String? = null,
+    val mime_type: String? = null,
+    val frames: List<PixivUgoiraFrame> = emptyList(),
+)
+
+@Serializable
+internal class PixivUgoiraFrame(
+    val file: String,
+    val delay: Int,
+)

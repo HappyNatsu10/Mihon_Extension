@@ -67,8 +67,9 @@ class Feeds(
                 throw Exception("Log in to DeviantArt: open this source in WebView (globe icon), sign in, then try again.")
             }
             if (!response.isSuccessful) {
+                val code = response.code
                 response.close()
-                return MangasPage(emptyList(), false)
+                throw java.io.IOException(HttpGuard.classifyError(code, "", "followed feed"))
             }
             val html = response.body.string()
             val doc = Jsoup.parse(html, watchUrl)
@@ -103,25 +104,17 @@ class Feeds(
             }
             MangasPage(mangas, hasNextPage = mangas.isNotEmpty())
         } catch (e: Exception) {
-            if (e.message?.contains("Log in to DeviantArt") == true) throw e
-            MangasPage(emptyList(), false)
+            throw e
         }
     }
 
     private fun fetchFeed(url: String): MangasPage {
         val request = Request.Builder().url(url).build()
-        val response = try {
-            client.newCall(request).execute()
-        } catch (_: Exception) {
-            return MangasPage(emptyList(), false)
-        }
+        // Errors are no longer swallowed: a 403/429 now shows a classified message instead of an empty list.
+        val response = HttpGuard.executeWithRetry("feed") { client.newCall(request).execute() }
+        val xmlText = response.use { it.body.string() }
 
-        if (!response.isSuccessful) {
-            response.close()
-            return MangasPage(emptyList(), false)
-        }
-
-        val xml = Jsoup.parse(response.body.string(), url, Parser.xmlParser())
+        val xml = Jsoup.parse(xmlText, url, Parser.xmlParser())
         val items = xml.select("item")
         if (items.isEmpty()) {
             return MangasPage(emptyList(), false)

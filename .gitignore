@@ -23,3 +23,6 @@ Thumbs.db
 # Archives
 *.rar
 *.zip
+
+# Local task files
+files/

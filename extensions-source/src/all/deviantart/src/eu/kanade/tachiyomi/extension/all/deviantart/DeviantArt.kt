@@ -38,26 +38,11 @@ abstract class DeviantArt :
     private val api by lazy { DeviantArtApi(client, preferences.debugLog) }
     private val feeds by lazy { Feeds(client, baseUrl) }
 
-    override fun OkHttpClient.Builder.configureClient(): OkHttpClient.Builder = rateLimit(permits = 2, period = 1.seconds) { it.host == "backend.deviantart.com" }
+    override fun OkHttpClient.Builder.configureClient(): OkHttpClient.Builder =
+        addInterceptor(DescriptionInterceptor { devId -> api.fetchArtworkDescriptionById(devId) })
+        .rateLimit(permits = 2, period = 1.seconds) { it.host == "backend.deviantart.com" }
         .rateLimit(permits = 2, period = 1.seconds) { it.host == "www.deviantart.com" }
         .rateLimit(permits = 10, period = 1.seconds) { it.host.endsWith("wixmp.com") }
-        .addInterceptor { chain ->
-            val request = chain.request()
-            var response = chain.proceed(request)
-            var attempt = 0
-            while (response.code == 429 && attempt < 3) {
-                response.close()
-                attempt++
-                val retryAfter = response.header("Retry-After")?.toLongOrNull() ?: (attempt * 1L)
-                try {
-                    Thread.sleep(retryAfter * 1000L)
-                } catch (_: InterruptedException) {
-                    break
-                }
-                response = chain.proceed(request)
-            }
-            response
-        }
 
     override fun Headers.Builder.configureHeaders(): Headers.Builder = set("Referer", "$baseUrl/")
 
@@ -86,6 +71,19 @@ abstract class DeviantArt :
         }
         val resolved = DeviantArtUrl.resolve(url.toString())
         return resolveToMangas(resolved).firstOrNull()
+    }
+
+    /**
+     * KeiSource.getSearchManga() sends ANY pasted URL here, never to getSearchMangaList(). The default
+     * implementation calls getMangaByUrl(), which can return only ONE entry, so an artwork link used
+     * to produce only the artwork. Return the gallery first, then the artwork.
+     */
+    override suspend fun getMangasByUrl(url: HttpUrl, page: Int): MangasPage {
+        if (page > 1) return MangasPage(emptyList(), false)
+        val resolved = DeviantArtUrl.resolve(url.toString())
+        if (resolved is Resolved.Invalid) return MangasPage(emptyList(), false)
+        val mangas = resolveToMangas(resolved).sortedBy { if (it.url.contains("/art/")) 1 else 0 }
+        return MangasPage(mangas, false)
     }
 
     override suspend fun getSearchMangaList(page: Int, query: String, filters: FilterList): MangasPage {
@@ -310,18 +308,18 @@ abstract class DeviantArt :
                     isFavourites = ref.isFavourites,
                     debugLog = preferences.debugLog,
                 ) { offset ->
-                    api.fetchRssPageResult(ref.user, ref.folderId, ref.isFavourites, offset)
-                }
-
-                val total = items.size
-                updatedChapters = items.mapIndexed { index, item ->
-                    SChapter.create().apply {
-                        name = item.title
-                        url = item.path
-                        date_upload = item.publishedMs
-                        chapter_number = GalleryCache.chapterNumber(index, total)
+                    try {
+                        api.fetchGalleryJson(ref.user, ref.folderId, ref.isFavourites, offset, limit = 24)
+                    } catch (e: Exception) {
+                        if (offset == 0 && !e.message.orEmpty().contains("403")) {
+                            api.fetchRssPageResult(ref.user, ref.folderId, ref.isFavourites, offset)
+                        } else {
+                            throw e
+                        }
                     }
                 }
+
+                updatedChapters = mergeWithExisting(items, chapters, sortById = !ref.isFavourites)
             }
         }
 
@@ -354,9 +352,35 @@ abstract class DeviantArt :
             throw IOException("This artwork is not available without login")
         }
 
-        return images.mapIndexed { index, imgUrl ->
+        val pages = images.mapIndexed { index, imgUrl ->
             Page(index, url = chapterUrl, imageUrl = imgUrl)
+        }.toMutableList()
+
+        val devId = trailingIdRegex.find(chapterUrl)?.groupValues?.get(1)
+            ?: chapterUrl.substringAfterLast("-").substringAfterLast("/")
+
+        if (preferences.showDescription && devId.isNotBlank()) {
+            val desc = DescriptionStore.get(devId) ?: api.fetchArtworkDescription(chapterUrl)
+            if (desc != null && desc.text.isNotBlank()) {
+                val maxPages = preferences.descriptionMaxPages
+                val pageCount = DescriptionRenderer.computePageCount(desc, maxPages)
+                if (pageCount > 0) {
+                    val hash = computeDescriptionHash(desc.text, desc.title, desc.author)
+                    val baseIndex = pages.size
+                    for (n in 1..pageCount) {
+                        pages.add(
+                            Page(
+                                index = baseIndex + n - 1,
+                                url = chapterUrl,
+                                imageUrl = "https://da-description.invalid/$devId/$hash/$n.png",
+                            ),
+                        )
+                    }
+                }
+            }
         }
+
+        return pages
     }
 
     override fun imageRequest(page: Page): Request = super.imageRequest(page).newBuilder()
@@ -419,6 +443,24 @@ abstract class DeviantArt :
         }
         screen.addPreference(debugLogPref)
 
+        val showDescriptionPref = SwitchPreferenceCompat(screen.context).apply {
+            key = PREF_SHOW_DESCRIPTION_KEY
+            title = "Show artwork description as page"
+            summary = "Renders the artist's description and title as extra page(s) at the end of each artwork chapter."
+            setDefaultValue(true)
+        }
+        screen.addPreference(showDescriptionPref)
+
+        val descriptionMaxPagesPref = ListPreference(screen.context).apply {
+            key = PREF_DESCRIPTION_MAX_PAGES_KEY
+            title = "Maximum description pages"
+            entries = arrayOf("1 page", "2 pages", "3 pages (Default)", "4 pages", "5 pages", "6 pages")
+            entryValues = arrayOf("1", "2", "3", "4", "5", "6")
+            summary = "Current: %s"
+            setDefaultValue("3")
+        }
+        screen.addPreference(descriptionMaxPagesPref)
+
         val clearCachePref = Preference().apply {
             title = "Clear gallery disk cache"
             summary = "Deletes crawl cache files to force fresh crawling. Never deletes chapter read history or the permanent ledger."
@@ -460,9 +502,77 @@ abstract class DeviantArt :
     private val SharedPreferences.debugLog: Boolean
         get() = getBoolean(PREF_DEBUG_LOG_KEY, false)
 
+    private val SharedPreferences.showDescription: Boolean
+        get() = getBoolean(PREF_SHOW_DESCRIPTION_KEY, true)
+
+    private val SharedPreferences.descriptionMaxPages: Int
+        get() = getString(PREF_DESCRIPTION_MAX_PAGES_KEY, "3")?.toIntOrNull()?.coerceIn(1, 6) ?: 3
+
     companion object {
         private const val PREF_CHAPTER_MODE_KEY = "chapter_mode"
         private const val PREF_IMAGE_QUALITY_KEY = "image_quality"
         private const val PREF_DEBUG_LOG_KEY = "debug_log"
+        private const val PREF_SHOW_DESCRIPTION_KEY = "show_description"
+        private const val PREF_DESCRIPTION_MAX_PAGES_KEY = "description_max_pages"
     }
+}
+
+// ============================== Chapter merge ==============================
+
+internal val trailingIdRegex = Regex("""-(\d+)(?:[/?#].*)?$""")
+
+internal fun artworkId(url: String): Long = trailingIdRegex.find(url)?.groupValues?.get(1)?.toLongOrNull() ?: 0L
+
+internal fun chapterKey(url: String): String = artworkId(url).takeIf { it != 0L }?.toString() ?: url
+
+/**
+ * Mihon deletes every stored chapter that is missing from the list we return, together with its
+ * read history. The result must therefore ALWAYS be a superset of `existing` (the chapters Mihon
+ * already stores). Existing chapters keep their stored URL (their identity); crawled items only
+ * add what is new. A partial or failed crawl can no longer shrink a gallery.
+ */
+internal fun mergeWithExisting(
+    crawled: List<CachedItem>,
+    existing: List<SChapter>,
+    sortById: Boolean,
+    chapterFactory: () -> SChapter = { SChapter.create() },
+): List<SChapter> {
+    val byKey = LinkedHashMap<String, SChapter>()
+    val crawledOrder = ArrayList<String>()
+
+    for (item in crawled) {
+        val key = chapterKey(item.path)
+        crawledOrder.add(key)
+        byKey[key] = chapterFactory().apply {
+            url = item.path
+            name = item.title
+            date_upload = item.publishedMs
+        }
+    }
+    for (old in existing) {
+        if (old.url.contains("batch=")) continue // chapters from the optional batch mode
+        val key = chapterKey(old.url)
+        // keep the STORED url so Mihon keeps matching the same chapter (and its read state)
+        byKey[key] = chapterFactory().apply {
+            url = old.url
+            name = byKey[key]?.name ?: old.name
+            date_upload = byKey[key]?.date_upload?.takeIf { it > 0L } ?: old.date_upload
+        }
+    }
+
+    val ordered: List<SChapter> = if (sortById) {
+        byKey.values.sortedWith(
+            compareByDescending<SChapter> { artworkId(it.url) }.thenByDescending { it.date_upload },
+        )
+    } else {
+        val inCrawl = crawledOrder.mapNotNull { byKey[it] }
+        val crawlKeys = crawledOrder.toHashSet()
+        inCrawl + byKey.filterKeys { it !in crawlKeys }.values
+    }
+
+    val total = ordered.size
+    ordered.forEachIndexed { index, chapter ->
+        chapter.chapter_number = (total - index).toFloat()
+    }
+    return ordered
 }

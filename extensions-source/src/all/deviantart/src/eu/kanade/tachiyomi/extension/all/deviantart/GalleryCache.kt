@@ -170,53 +170,95 @@ object GalleryCache {
             // Full crawl or resume partial crawl
             val partialItems = validCached?.items?.toMutableList() ?: mutableListOf()
             val seenIds = partialItems.map { it.id }.toMutableSet()
-            var offset = partialItems.size
+            var offset = validCached?.nextOffset ?: partialItems.size
             var pagesSinceSave = 0
             val crawlStartTime = System.currentTimeMillis()
 
-            while (true) {
-                // Check 4-minute time budget (FR-12 item 7)
-                if (System.currentTimeMillis() - crawlStartTime > MAX_CRAWL_DURATION_MS) {
-                    saveCache(user, folderId, isFavourites, GalleryCacheData(schemaVersion = 2, complete = false, items = partialItems))
-                    throw IOException(
-                        "Loading gallery: ${partialItems.size} artworks cached so far. Update again to continue.",
-                    )
-                }
-
-                val pageResult = fetchPageResult(offset)
-                val page = pageResult.items
-                if (page.isEmpty()) break
-
-                for (item in page) {
-                    if (seenIds.add(item.id)) {
-                        partialItems.add(item)
+            try {
+                while (true) {
+                    // Check 4-minute time budget (FR-12 item 7)
+                    if (System.currentTimeMillis() - crawlStartTime > MAX_CRAWL_DURATION_MS) {
+                        saveCache(
+                            user,
+                            folderId,
+                            isFavourites,
+                            GalleryCacheData(schemaVersion = 2, complete = false, items = partialItems, nextOffset = offset),
+                        )
+                        throw IOException(
+                            "Loading gallery: ${partialItems.size} artworks cached so far. Update again to continue.",
+                        )
                     }
-                }
 
-                pagesSinceSave++
-                if (pagesSinceSave >= 20) {
-                    saveCache(user, folderId, isFavourites, GalleryCacheData(schemaVersion = 2, complete = false, items = partialItems))
-                    pagesSinceSave = 0
-                }
+                    var pageResult = fetchPageResult(offset)
+                    var page = pageResult.items
 
-                if (!pageResult.hasNextPage) {
-                    // Reached end of gallery
-                    break
-                }
-
-                val nextOffsetFromLink = pageResult.nextUrl?.let { link ->
-                    try {
-                        link.toHttpUrl().queryParameter("offset")?.toIntOrNull()
-                    } catch (_: Exception) {
-                        null
+                    if (page.isEmpty() && pageResult.hasNextPage) {
+                        // Unexpected empty page: retry once
+                        try {
+                            Thread.sleep(1000L)
+                        } catch (_: InterruptedException) {}
+                        pageResult = fetchPageResult(offset)
+                        page = pageResult.items
+                        if (page.isEmpty() && pageResult.hasNextPage) {
+                            saveCache(
+                                user,
+                                folderId,
+                                isFavourites,
+                                GalleryCacheData(schemaVersion = 2, complete = false, items = partialItems, nextOffset = offset),
+                            )
+                            throw IOException("Gallery crawl paused at offset $offset: unexpected empty page. Update again to resume.")
+                        }
                     }
+
+                    for (item in page) {
+                        if (seenIds.add(item.id)) {
+                            partialItems.add(item)
+                        }
+                    }
+
+                    pagesSinceSave++
+                    if (pagesSinceSave >= 20) {
+                        saveCache(
+                            user,
+                            folderId,
+                            isFavourites,
+                            GalleryCacheData(schemaVersion = 2, complete = false, items = partialItems, nextOffset = offset),
+                        )
+                        pagesSinceSave = 0
+                    }
+
+                    if (!pageResult.hasNextPage) {
+                        // Reached genuine end of gallery
+                        break
+                    }
+
+                    val nextOffsetFromLink = pageResult.nextUrl?.let { link ->
+                        try {
+                            link.toHttpUrl().queryParameter("offset")?.toIntOrNull()
+                        } catch (_: Exception) {
+                            null
+                        }
+                    }
+                    offset = nextOffsetFromLink ?: (offset + page.size)
                 }
-                offset = nextOffsetFromLink ?: (offset + page.size)
+
+                saveCache(
+                    user,
+                    folderId,
+                    isFavourites,
+                    GalleryCacheData(schemaVersion = 2, complete = true, items = partialItems, nextOffset = null),
+                )
+                // Reconcile with permanent ChapterLedger
+                ChapterLedger.recordChapters(user, folderId, isFavourites, partialItems, debugLog)
+            } catch (e: Exception) {
+                saveCache(
+                    user,
+                    folderId,
+                    isFavourites,
+                    GalleryCacheData(schemaVersion = 2, complete = false, items = partialItems, nextOffset = offset),
+                )
+                throw e
             }
-
-            saveCache(user, folderId, isFavourites, GalleryCacheData(schemaVersion = 2, complete = true, items = partialItems))
-            // Reconcile with permanent ChapterLedger
-            ChapterLedger.recordChapters(user, folderId, isFavourites, partialItems, debugLog)
         }
     }
 

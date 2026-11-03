@@ -1,6 +1,16 @@
 package eu.kanade.tachiyomi.extension.all.deviantart
 
+import android.util.Log
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.longOrNull
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -9,6 +19,7 @@ import org.jsoup.nodes.Document
 import org.jsoup.parser.Parser
 import java.io.IOException
 import java.time.DateTimeException
+import java.time.OffsetDateTime
 import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
 import java.util.Locale
@@ -341,6 +352,262 @@ class DeviantArtApi(
         offset: Int,
     ): List<CachedItem> = fetchRssPageResult(user, folderId, false, offset).items
 
+    private var csrf: String? = null
+
+    fun csrfToken(force: Boolean = false): String {
+        csrf?.takeIf { !force }?.let { return it }
+        val html = HttpGuard.executeWithRetry("csrf", debugLog) {
+            client.newCall(Request.Builder().url("$WEB_BASE_URL/").build()).execute()
+        }.use { it.body.string() }
+        val t = Regex("""__CSRF_TOKEN__\s*=\s*'([^']+)'""").find(html)?.groupValues?.get(1)
+            ?: throw IOException("DeviantArt: could not read the CSRF token. Open the source in WebView and retry.")
+        csrf = t
+        return t
+    }
+
+    /** Returns RssPageResult type so GalleryCache keeps working. */
+    fun fetchGalleryJson(
+        user: String,
+        folderId: String?,
+        isFavourites: Boolean = false,
+        offset: Int = 0,
+        limit: Int = 24,
+    ): RssPageResult {
+        fun call(force: Boolean): String {
+            val type = if (isFavourites) "collection" else "gallery"
+            val url = "$WEB_BASE_URL/_puppy/dashared/gallection/contents".toHttpUrl().newBuilder()
+                .addQueryParameter("username", user.lowercase())
+                .addQueryParameter("type", type)
+                .addQueryParameter("offset", offset.toString())
+                .addQueryParameter("limit", limit.toString())
+                .apply {
+                    if (folderId == null || folderId.equals("all", true)) {
+                        addQueryParameter("all_folder", "true")
+                    } else {
+                        addQueryParameter("folderid", folderId)
+                    }
+                }
+                .addQueryParameter("csrf_token", csrfToken(force))
+                .build()
+            return HttpGuard.executeWithRetry("gallery list", debugLog) {
+                client.newCall(Request.Builder().url(url).build()).execute()
+            }.use { it.body.string() }
+        }
+
+        var body = call(force = false)
+        if (body.contains("\"csrf\"") && body.contains("invalid")) {
+            body = call(force = true) // stale token: refresh once
+        }
+
+        val root = json.parseToJsonElement(body).jsonObject
+        val raw = root["results"]?.jsonArray.orEmpty()
+        val items = raw.mapNotNull { el ->
+            val obj = el.jsonObject
+            val dev = (obj["deviation"] as? JsonObject) ?: obj
+            val id = dev["deviationId"]?.jsonPrimitive?.longOrNull ?: return@mapNotNull null
+            val link = dev["url"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+            val publishedTime = dev["publishedTime"]?.jsonPrimitive?.contentOrNull
+            val publishedMs = if (publishedTime != null) {
+                try {
+                    OffsetDateTime.parse(publishedTime).toInstant().toEpochMilli()
+                } catch (_: Exception) {
+                    0L
+                }
+            } else {
+                0L
+            }
+            CachedItem(
+                id = id.toString(),
+                title = dev["title"]?.jsonPrimitive?.contentOrNull ?: "Untitled",
+                path = link.removePrefix(WEB_BASE_URL),
+                publishedMs = publishedMs,
+            )
+        }
+        val next = root["nextOffset"]?.jsonPrimitive?.intOrNull
+        val hasMore = root["hasMore"]?.jsonPrimitive?.booleanOrNull ?: false
+        return RssPageResult(items, next?.let { "$WEB_BASE_URL/?offset=$it" }, hasMore)
+    }
+
+    private val QUALITY_REGEX = Regex(",q_\\d+")
+
+    /** Full-view URL exactly as DeviantArt composes it; only the quality value is raised. Never edit w_/h_. */
+    fun fullviewUrl(m: Media, raiseQuality: Boolean = true): String? {
+        val base = m.baseUri ?: return null
+        val fv = m.types.firstOrNull { it.t == "fullview" }
+            ?: m.types.firstOrNull { it.t == "preview" }
+            ?: m.types.firstOrNull()
+        val path = fv?.c?.replace("<prettyName>", m.prettyName.orEmpty())
+        var url = if (path != null) base + path else base
+        if (raiseQuality) url = QUALITY_REGEX.replace(url, ",q_100")
+        val token = m.token.firstOrNull()
+        return if (token != null) "$url?token=$token" else url
+    }
+
+    /** Original file; only for isDownloadable artworks, usually needs login cookies. */
+    fun originalUrl(artworkUrl: String, html: String? = null): String? {
+        val pageHtml = html ?: try {
+            HttpGuard.executeWithRetry("artwork page", debugLog) {
+                client.newCall(Request.Builder().url(artworkUrl).build()).execute()
+            }.use { it.body.string() }
+        } catch (_: Exception) {
+            return null
+        }
+        val marker = "https://www.deviantart.com/download/"
+        val start = pageHtml.indexOf(marker).takeIf { it >= 0 } ?: return null
+        val end = pageHtml.indexOf('"', start).takeIf { it > start } ?: return null
+        return Parser.unescapeEntities(pageHtml.substring(start, end), false)
+    }
+
+    fun parseMedia(element: JsonElement?): Media? {
+        val obj = element as? JsonObject ?: return null
+        val baseUri = obj["baseUri"]?.jsonPrimitive?.contentOrNull ?: return null
+        val prettyName = obj["prettyName"]?.jsonPrimitive?.contentOrNull
+        val token = obj["token"]?.jsonArray?.mapNotNull { it.jsonPrimitive.contentOrNull }.orEmpty()
+        val types = obj["types"]?.jsonArray?.mapNotNull { typeEl ->
+            val tObj = typeEl as? JsonObject ?: return@mapNotNull null
+            val t = tObj["t"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+            val c = tObj["c"]?.jsonPrimitive?.contentOrNull
+            val h = tObj["h"]?.jsonPrimitive?.intOrNull
+            val w = tObj["w"]?.jsonPrimitive?.intOrNull
+            MediaType(t = t, c = c, h = h, w = w)
+        }.orEmpty()
+        return Media(baseUri = baseUri, prettyName = prettyName, token = token, types = types)
+    }
+
+    fun fetchAdditionalMedia(devId: String): List<Media> {
+        val csrf = try { csrfToken() } catch (_: Exception) { return emptyList() }
+        val url = "$WEB_BASE_URL/_puppy/dadeviation/media".toHttpUrl().newBuilder()
+            .addQueryParameter("deviationid", devId)
+            .addQueryParameter("csrf_token", csrf)
+            .build()
+        val body = try {
+            HttpGuard.executeWithRetry("additional media", debugLog) {
+                client.newCall(Request.Builder().url(url).build()).execute()
+            }.use { it.body.string() }
+        } catch (_: Exception) {
+            return emptyList()
+        }
+
+        return try {
+            val root = json.parseToJsonElement(body).jsonObject
+            val list = root["additionalMedia"]?.jsonArray
+                ?: root["results"]?.jsonArray
+                ?: root["media"]?.jsonArray
+            list?.mapNotNull { parseMedia(it) }.orEmpty()
+        } catch (_: Exception) {
+            emptyList()
+        }
+    }
+
+    fun extractDeviationMediaFromHtml(html: String, devId: String): Pair<Media?, List<Media>> {
+        try {
+            val marker = "window.__INITIAL_STATE__ = JSON.parse(\""
+            val start = html.indexOf(marker)
+            if (start != -1) {
+                val startIdx = start + marker.length
+                val endIdx = html.indexOf("\");", startIdx).takeIf { it > startIdx } ?: html.length
+                val escaped = html.substring(startIdx, endIdx).replace("\\'", "'")
+                val rawJson = json.decodeFromString<String>("\"$escaped\"")
+                val root = json.parseToJsonElement(rawJson).jsonObject
+                val devObj = root["@@entities"]?.jsonObject?.get("deviation")?.jsonObject?.get(devId)?.jsonObject
+                if (devObj != null) {
+                    val primary = parseMedia(devObj["media"])
+                    val additional = devObj["additionalMedia"]?.jsonArray?.mapNotNull { parseMedia(it) }.orEmpty()
+                    return Pair(primary, additional)
+                }
+            }
+        } catch (_: Exception) {}
+        return Pair(null, emptyList())
+    }
+
+    fun fetchArtworkDescription(relativeOrFullUrl: String): ArtworkDescription? {
+        val fullUrl = if (relativeOrFullUrl.startsWith("http")) relativeOrFullUrl else "$WEB_BASE_URL$relativeOrFullUrl"
+        val devId = DEVIATION_ID_REGEX.find(relativeOrFullUrl)?.groupValues?.get(1)
+            ?: relativeOrFullUrl.substringAfterLast("-").substringAfterLast("/")
+
+        return try {
+            val response = HttpGuard.executeWithRetry("artwork description", debugLog) {
+                client.newCall(Request.Builder().url(fullUrl).build()).execute()
+            }
+            val html = response.body.string()
+            val doc = Jsoup.parse(html, fullUrl)
+            extractAndStoreDescription(devId, doc, html, relativeOrFullUrl)
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    fun fetchArtworkDescriptionById(devId: String): ArtworkDescription? {
+        DescriptionStore.get(devId)?.let { return it }
+        val url = "$WEB_BASE_URL/deviation/$devId"
+        return fetchArtworkDescription(url)
+    }
+
+    fun extractAndStoreDescription(
+        devId: String,
+        doc: Document,
+        html: String,
+        relativeUrl: String,
+    ): ArtworkDescription? {
+        val defaultAuthor = relativeUrl.removePrefix("/").substringBefore("/art/").substringBefore("/")
+        val defaultTitle = relativeUrl.substringAfter("/art/").substringBeforeLast("-").replace("-", " ").ifBlank { "Artwork" }
+
+        val title = doc.selectFirst("meta[property=og:title]")?.attr("content")?.substringBefore(" by ")?.trim()
+            ?: doc.title().substringBefore(" by ").trim().ifBlank { defaultTitle }
+
+        val author = doc.selectFirst("meta[property=og:title]")?.attr("content")?.substringAfter(" by ")?.substringBefore(" on DeviantArt")?.trim()
+            ?: defaultAuthor
+
+        val date = doc.selectFirst("time")?.text()
+            ?: doc.selectFirst("meta[property=article:published_time]")?.attr("content")?.let {
+                try {
+                    val zdt = OffsetDateTime.parse(it)
+                    DateTimeFormatter.ofPattern("d MMM yyyy", Locale.ENGLISH).format(zdt)
+                } catch (_: Exception) {
+                    null
+                }
+            }
+
+        // Description extraction priority:
+        // 1. Rendered DOM inside #description
+        val descEl = doc.selectFirst("#description [data-editor-viewer]")
+            ?: doc.selectFirst("#description")
+            ?: doc.selectFirst(".legacy-journal")
+            ?: doc.selectFirst("[data-hook=art_stage] + div")
+
+        var rawText = descEl?.let { descriptionToText(it.html()) }.orEmpty()
+
+        // 2. Fallback to meta tags if DOM had no description
+        if (rawText.isBlank()) {
+            val metaDesc = doc.selectFirst("meta[property=og:description]")?.attr("content")
+                ?: doc.selectFirst("meta[name=description]")?.attr("content")
+            if (!metaDesc.isNullOrBlank()) {
+                var cleaned = metaDesc
+                val onDaIdx = cleaned.indexOf(" on DeviantArt.")
+                if (onDaIdx != -1) {
+                    cleaned = cleaned.substring(onDaIdx + " on DeviantArt.".length).trim()
+                }
+                val pubIdx = cleaned.indexOf(" · Published:")
+                if (pubIdx != -1) {
+                    cleaned = cleaned.substring(0, pubIdx).trim()
+                }
+                rawText = descriptionToText(cleaned)
+            }
+        }
+
+        if (rawText.isBlank()) return null
+
+        val desc = ArtworkDescription(
+            deviationId = devId,
+            title = title,
+            author = author,
+            date = date,
+            text = rawText,
+        )
+        DescriptionStore.put(devId, desc)
+        return desc
+    }
+
     /**
      * Fetches fresh full-size image URL(s) for a single deviation (FR-5, FR-6, FR-14, FR-16).
      * Selects uncropped, maximum resolution images, supports video deviations, and preserves multi-page deviations.
@@ -350,6 +617,8 @@ class DeviantArtApi(
         qualityMode: QualityMode = QualityMode.BEST_AVAILABLE,
     ): List<String> {
         val fullUrl = if (relativeUrl.startsWith("http")) relativeUrl else "$WEB_BASE_URL$relativeUrl"
+        val devId = DEVIATION_ID_REGEX.find(relativeUrl)?.groupValues?.get(1)
+            ?: relativeUrl.substringAfterLast("-").substringAfterLast("/")
 
         // 1. Scrape deviation webpage
         val response = try {
@@ -357,7 +626,6 @@ class DeviantArtApi(
                 client.newCall(Request.Builder().url(fullUrl).build()).execute()
             }
         } catch (e: Exception) {
-            // Fallback to oEmbed if webpage fetch fails
             resolveOembedImage(fullUrl)?.takeIf { isArtworkUrl(it) }?.let { return listOf(it) }
             throw e
         }
@@ -365,9 +633,10 @@ class DeviantArtApi(
         val html = response.body.string()
         val doc = Jsoup.parse(html, fullUrl)
 
-        // 2. Check for video deviation (Wix MP4 qualities or HTML5 video)
-        val devId = DEVIATION_ID_REGEX.find(relativeUrl)?.groupValues?.get(1)
-            ?: relativeUrl.substringAfterLast("-").substringAfterLast("/")
+        // 2. Extract and store description for DescriptionStore
+        extractAndStoreDescription(devId, doc, html, relativeUrl)
+
+        // 3. Check for video deviation (Wix MP4 qualities or HTML5 video)
         val videoUrls = extractVideoUrls(html, devId)
         val bestVideo = pickBestVideoUrl(videoUrls, qualityMode)
         if (bestVideo != null) {
@@ -384,32 +653,47 @@ class DeviantArtApi(
         // Check if literature / text deviation
         val isLiterature = doc.selectFirst(".legacy-journal") != null || doc.selectFirst("[data-hook=art_stage] p") != null
 
-        // 2. Check for multi-image deviation (buttons with thumbnails, carousels, attached pages)
-        val buttonContainers = doc.select("[draggable=false]")
-        for (container in buttonContainers) {
-            val childButtons = container.children().filter { it.selectFirst("img") != null }
-            if (childButtons.size > 1) {
-                val urls = childButtons.mapNotNull { btn ->
-                    val rawSrc = btn.selectFirst("img")?.absUrl("src") ?: return@mapNotNull null
-                    if (isArtworkUrl(rawSrc)) rawSrc else null
-                }
-                if (urls.size > 1) return urls.map { ImageSelector.maximizeRendition(it) }
-            }
+        // 4. Extract primary media & additionalMedia for multi-page deviations
+        // NO DRAGGABLE / CAROUSEL SCRAPING! This guarantees no other artworks appear as pages!
+        val (primaryMedia, htmlAdditional) = extractDeviationMediaFromHtml(html, devId)
+        val additionalMedia = if (htmlAdditional.isNotEmpty()) {
+            htmlAdditional
+        } else {
+            fetchAdditionalMedia(devId)
         }
 
-        val stageImages = doc.select("[data-hook=art_stage] img")
-        if (stageImages.size > 1) {
-            val urls = stageImages.mapNotNull { img ->
-                val rawSrc = img.absUrl("src")
-                if (isArtworkUrl(rawSrc)) rawSrc else null
-            }
-            if (urls.size > 1) return urls.map { ImageSelector.maximizeRendition(it) }
+        val raiseQuality = (qualityMode == QualityMode.BEST_AVAILABLE)
+        val resultPages = mutableListOf<String>()
+
+        // Check original download URL if BEST_AVAILABLE
+        val isDownloadable = doc.selectFirst("a[data-hook=download_button]") != null ||
+            doc.selectFirst("a[aria-label=Download]") != null ||
+            doc.selectFirst("a[data-hook=action_download]") != null ||
+            html.contains("\"isDownloadable\":true")
+
+        val origUrl = if (isDownloadable && qualityMode == QualityMode.BEST_AVAILABLE) {
+            originalUrl(fullUrl, html)
+        } else {
+            null
         }
 
-        // 3. Single image candidate collection
+        if (origUrl != null) {
+            resultPages.add(origUrl)
+        } else if (primaryMedia != null) {
+            fullviewUrl(primaryMedia, raiseQuality)?.let { resultPages.add(it) }
+        }
+
+        // Add additional genuine pages from stack in order
+        for (extra in additionalMedia) {
+            fullviewUrl(extra, raiseQuality)?.let { resultPages.add(it) }
+        }
+
+        if (resultPages.isNotEmpty()) {
+            return resultPages
+        }
+
+        // 5. Fallback candidate collection if media JSON was missing
         val candidates = mutableListOf<CandidateRendition>()
-
-        // Check original dimensions
         val origW = doc.selectFirst("meta[property=og:image:width]")?.attr("content")?.toIntOrNull()
             ?: extractLdJsonDimension(doc, "width")
         val origH = doc.selectFirst("meta[property=og:image:height]")?.attr("content")?.toIntOrNull()
@@ -420,24 +704,6 @@ class DeviantArtApi(
             null
         }
 
-        // Check download button: only accept direct artwork image URLs, never internal /download/ endpoints that require login
-        val downloadBtn = doc.selectFirst("a[data-hook=download_button]")
-            ?: doc.selectFirst("a[aria-label=Download]")
-            ?: doc.selectFirst("a[data-hook=action_download]")
-        val downloadUrl = downloadBtn?.absUrl("href")?.takeIf { it.isNotEmpty() && isArtworkUrl(it) }
-        if (downloadUrl != null) {
-            candidates.add(
-                CandidateRendition(
-                    name = "download",
-                    width = origW ?: 4000,
-                    height = origH ?: 4000,
-                    url = downloadUrl,
-                    isDownload = true,
-                ),
-            )
-        }
-
-        // Single image fullview candidates: prioritize main artwork renditions
         val mainImage = doc.selectFirst("img[fetchpriority=high]")
             ?: doc.selectFirst("img[property=contentUrl]")
             ?: doc.selectFirst("img[data-hook=deviation_link]")
@@ -452,23 +718,15 @@ class DeviantArtApi(
             }
         }
 
-        // OpenGraph fallback
         val ogImage = doc.selectFirst("meta[property=og:image]")?.attr("content")
         if (!ogImage.isNullOrEmpty() && isArtworkUrl(ogImage) && candidates.none { it.url == ogImage }) {
-            candidates.add(
-                CandidateRendition(
-                    name = "og:image",
-                    width = origW ?: 1200,
-                    height = origH ?: 630,
-                    url = ogImage,
-                ),
-            )
+            candidates.add(CandidateRendition(name = "og:image", width = origW ?: 1200, height = origH ?: 630, url = ogImage))
         }
 
         val selected = ImageSelector.pickRendition(
             candidates = candidates,
             original = originalDim,
-            isDownloadAllowed = downloadUrl != null,
+            isDownloadAllowed = origUrl != null,
             qualityMode = qualityMode,
         )
 
@@ -476,7 +734,7 @@ class DeviantArtApi(
             return listOf(ImageSelector.maximizeRendition(selected.url))
         }
 
-        // 4. Last resort: oEmbed lookup
+        // 6. Last resort: oEmbed lookup
         resolveOembedImage(fullUrl)?.takeIf { isArtworkUrl(it) }?.let {
             return listOf(ImageSelector.maximizeRendition(it))
         }

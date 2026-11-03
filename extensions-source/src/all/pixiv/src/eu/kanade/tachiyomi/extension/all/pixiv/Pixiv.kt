@@ -22,6 +22,7 @@ import kotlinx.serialization.json.JsonElement
 import okhttp3.Headers
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.OkHttpClient
 
 @Source
 abstract class Pixiv :
@@ -29,6 +30,8 @@ abstract class Pixiv :
     ConfigurableSource {
 
     private val preferences: SharedPreferences by getPreferencesLazy()
+
+    override fun OkHttpClient.Builder.configureClient(): OkHttpClient.Builder = addInterceptor(UgoiraInterceptor())
 
     private fun apiUrl(href: String): HttpUrl.Builder = baseUrl.toHttpUrl().newBuilder(href)!!
         .addEncodedQueryParameter("lang", lang)
@@ -247,7 +250,7 @@ abstract class Pixiv :
             val illusts = call.executeApi<PixivResults>().getOrThrow().illusts!!
             if (illusts.isEmpty()) return@PagedBuffer null
 
-            illusts.filter { illust -> illust.is_ad_container != 1 && illust.type != "2" }
+            illusts.filter { illust -> illust.is_ad_container != 1 }
         }
     }
 
@@ -491,12 +494,28 @@ abstract class Pixiv :
     override suspend fun getPageList(chapter: SChapter): List<Page> {
         val illustId = chapter.url.substringAfterLast('/')
 
+        val ugoiraMeta = checkUgoira(illustId)
+        if (ugoiraMeta != null) {
+            UgoiraMetaStore.put(illustId, ugoiraMeta)
+            return listOf(Page(0, chapter.url, UgoiraInterceptor.createUrl(illustId)))
+        }
+
         return apiUrl("/ajax/illust/$illustId/pages")
             .executeApi<List<PixivIllustPage>>().getOrThrow()
             .mapIndexed { i, page ->
                 val imageUrl = getImageUrl(page.urls!!)
                 Page(i, chapter.url, imageUrl)
             }
+    }
+
+    private suspend fun checkUgoira(illustId: String): PixivUgoiraMeta? {
+        val cachedIllust = getIllustCached(illustId)
+        if (cachedIllust?.type != null && cachedIllust.type != "2") {
+            return null
+        }
+        return apiUrl("/ajax/illust/$illustId/ugoira_meta")
+            .executeApi<PixivUgoiraMeta>()
+            .getOrNull()
     }
 
     private fun getImageUrl(urls: PixivIllustPageUrls): String {
@@ -536,3 +555,4 @@ abstract class Pixiv :
         private const val MAX_WINDOW_SIZE = 1000 // roughly 25 pages
     }
 }
+// 11/2/2026 11:05:35 PM
