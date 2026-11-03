@@ -40,6 +40,7 @@ abstract class DeviantArt :
 
     override fun OkHttpClient.Builder.configureClient(): OkHttpClient.Builder = addInterceptor(
         DescriptionInterceptor(
+            clientProvider = { client },
             fetchFallback = { devId -> api.fetchArtworkDescriptionById(devId) },
             maxPagesProvider = { preferences.descriptionMaxPages },
         ),
@@ -319,12 +320,8 @@ abstract class DeviantArt :
                         try {
                             api.fetchGalleryJson(ref.user, ref.folderId, ref.isFavourites, offset, limit = 60)
                         } catch (e: Exception) {
-                            if (offset == 0 && !e.message.orEmpty().contains("403")) {
-                                useRss = true
-                                api.fetchRssPageResult(ref.user, ref.folderId, ref.isFavourites, offset)
-                            } else {
-                                throw e
-                            }
+                            useRss = true
+                            api.fetchRssPageResult(ref.user, ref.folderId, ref.isFavourites, offset)
                         }
                     }
                 }
@@ -357,7 +354,15 @@ abstract class DeviantArt :
         }
 
         // Default mode: One chapter per artwork. Fetch single deviation fresh with ImageSelector quality ranking (FR-5, FR-6, FR-16).
-        val images = api.fetchDeviationImages(chapterUrl, preferences.imageQuality)
+        val images = try {
+            api.fetchDeviationImages(chapterUrl, preferences.imageQuality)
+        } catch (e: Exception) {
+            if (preferences.showDescription && (e.message.orEmpty().contains("literature", ignoreCase = true) || e.message.orEmpty().contains("text", ignoreCase = true))) {
+                emptyList()
+            } else {
+                throw e
+            }
+        }
         if (images.isEmpty()) {
             throw IOException("This artwork is not available without login")
         }

@@ -418,7 +418,7 @@ class DeviantArtApi(
                 .addQueryParameter("csrf_token", csrfToken(force))
                 .build()
             return HttpGuard.executeWithRetry("gallery list", debugLog) {
-                client.newCall(Request.Builder().url(url).build()).execute()
+                client.newCall(Request.Builder().url(url).header("Referer", "$WEB_BASE_URL/").build()).execute()
             }.use { it.body.string() }
         }
 
@@ -492,7 +492,8 @@ class DeviantArtApi(
     }
 
     fun parseMedia(element: JsonElement?): Media? {
-        val obj = element as? JsonObject ?: return null
+        val rootObj = element as? JsonObject ?: return null
+        val obj = (rootObj["media"] as? JsonObject) ?: rootObj
         val baseUri = obj["baseUri"]?.jsonPrimitive?.contentOrNull ?: return null
         val prettyName = obj["prettyName"]?.jsonPrimitive?.contentOrNull
         val token = obj["token"]?.jsonArray?.mapNotNull { it.jsonPrimitive.contentOrNull }.orEmpty()
@@ -692,19 +693,69 @@ class DeviantArtApi(
             }
 
         // Description extraction priority:
-        // 1. Rendered DOM inside #description
-        val descEl = doc.selectFirst("#description [data-editor-viewer]")
-            ?: doc.selectFirst("#description")
-            ?: doc.selectFirst(".legacy-journal")
-            ?: doc.selectFirst("[data-hook=art_stage] + div")
+        // 1. Try extracting rich description or literature body from window.__INITIAL_STATE__
+        var rawText = ""
+        try {
+            val marker = "window.__INITIAL_STATE__ = JSON.parse(\""
+            val start = html.indexOf(marker)
+            if (start != -1) {
+                val startIdx = start + marker.length
+                var endIdx = html.indexOf("\");\n", startIdx)
+                if (endIdx == -1) endIdx = html.indexOf("\");\r\n", startIdx)
+                if (endIdx == -1) endIdx = html.indexOf("\");window.__", startIdx)
+                if (endIdx == -1) endIdx = html.indexOf("\");", startIdx).takeIf { it > startIdx } ?: html.length
+                val escaped = html.substring(startIdx, endIdx).replace("\\'", "'")
+                val rawJson = json.decodeFromString<String>("\"$escaped\"")
+                val root = json.parseToJsonElement(rawJson).jsonObject
+                val devExt = root["@@entities"]?.jsonObject?.get("deviationExtended")?.jsonObject?.get(devId)?.jsonObject
+                    ?: root["@@entities"]?.jsonObject?.get("deviation")?.jsonObject?.get(devId)?.jsonObject?.get("extended")?.jsonObject
+                if (devExt != null) {
+                    val markup = devExt["body"]?.jsonObject?.get("markup")?.jsonPrimitive?.contentOrNull
+                        ?: devExt["description"]?.jsonObject?.get("markup")?.jsonPrimitive?.contentOrNull
+                    val htmlContent = devExt["bodyText"]?.jsonObject?.get("html")?.jsonPrimitive?.contentOrNull
+                        ?: devExt["descriptionText"]?.jsonObject?.get("html")?.jsonPrimitive?.contentOrNull
+                    val candidate = markup ?: htmlContent
+                    if (!candidate.isNullOrBlank()) {
+                        rawText = cleanDescriptionHtml(candidate)
+                    }
+                }
+            }
+        } catch (_: Exception) {}
 
-        var rawText = descEl?.let { cleanDescriptionHtml(it.html()) }.orEmpty()
+        // 2. Direct regex search in HTML for description or body markup
+        if (rawText.isBlank()) {
+            try {
+                val bodyMarkupRegex = Regex(""""body"\s*:\s*\{\s*"markup"\s*:\s*"((?:\\.|[^"\\])*)"""")
+                val descMarkupRegex = Regex(""""description"\s*:\s*\{\s*"markup"\s*:\s*"((?:\\.|[^"\\])*)"""")
+                val match = bodyMarkupRegex.find(html) ?: descMarkupRegex.find(html)
+                if (match != null) {
+                    val unescaped = match.groupValues[1]
+                        .replace("\\\"", "\"")
+                        .replace("\\'", "'")
+                        .replace("\\/", "/")
+                        .replace("\\\\", "\\")
+                    rawText = cleanDescriptionHtml(unescaped)
+                }
+            } catch (_: Exception) {}
+        }
 
-        // 2. Fallback to meta tags if DOM had no description
+        // 3. Rendered DOM inside #description
+        if (rawText.isBlank()) {
+            val descEl = doc.selectFirst("#description [data-editor-viewer]")
+                ?: doc.selectFirst("#description")
+                ?: doc.selectFirst(".legacy-journal")
+                ?: doc.selectFirst("[data-hook=art_stage] + div")
+            val domHtml = descEl?.html().orEmpty()
+            if (domHtml.isNotBlank() && domHtml != "{\\" && !domHtml.startsWith("{\\")) {
+                rawText = cleanDescriptionHtml(domHtml)
+            }
+        }
+
+        // 4. Fallback to meta tags if DOM had no description
         if (rawText.isBlank()) {
             val metaDesc = doc.selectFirst("meta[property=og:description]")?.attr("content")
                 ?: doc.selectFirst("meta[name=description]")?.attr("content")
-            if (!metaDesc.isNullOrBlank()) {
+            if (!metaDesc.isNullOrBlank() && metaDesc != "{\\" && !metaDesc.startsWith("{\\")) {
                 var cleaned = metaDesc
                 val onDaIdx = cleaned.indexOf(" on DeviantArt.")
                 if (onDaIdx != -1) {
@@ -714,7 +765,9 @@ class DeviantArtApi(
                 if (pubIdx != -1) {
                     cleaned = cleaned.substring(0, pubIdx).trim()
                 }
-                rawText = cleanDescriptionHtml(cleaned)
+                if (cleaned != "{\\" && !cleaned.startsWith("{\\")) {
+                    rawText = cleanDescriptionHtml(cleaned)
+                }
             }
         }
 

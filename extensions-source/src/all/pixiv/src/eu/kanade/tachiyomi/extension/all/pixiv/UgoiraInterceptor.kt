@@ -46,7 +46,7 @@ internal class UgoiraInterceptor : Interceptor {
         val cacheFile = File(cacheDir, "$illustId.gif")
 
         if (cacheFile.exists()) {
-            if (cacheFile.length() > 100) {
+            if (isValidGif(cacheFile)) {
                 return buildGifResponse(request, cacheFile)
             } else {
                 cacheFile.delete()
@@ -88,52 +88,99 @@ internal class UgoiraInterceptor : Interceptor {
                 throw IOException("Pixiv Ugoira: empty zip archive for $illustId")
             }
 
-            val encoder = AnimatedGifEncoder()
-            encoder.setRepeat(0) // loop indefinitely
-            encoder.setQuality(10) // good visual quality
+            val frameList = if (meta.frames.isNotEmpty()) {
+                meta.frames
+            } else {
+                framesMap.keys.sorted().map { PixivUgoiraFrame(file = it, delay = 125) }
+            }
 
-            var framesAdded = 0
             var canvasWidth = 0
             var canvasHeight = 0
+            for (f in frameList) {
+                val b = framesMap[f.file] ?: continue
+                val bmp = decodeAndScaleBitmap(b, 0, 0) ?: continue
+                canvasWidth = bmp.width
+                canvasHeight = bmp.height
+                bmp.recycle()
+                break
+            }
 
+            if (canvasWidth == 0 || canvasHeight == 0) {
+                throw IOException("Pixiv Ugoira: failed to determine canvas dimensions for $illustId")
+            }
+
+            // Sample keyframes across animation to compute optimal global palette
+            val sampleCount = minOf(6, frameList.size)
+            val sampleIndices = if (frameList.size <= 6) {
+                frameList.indices.toList()
+            } else {
+                val step = (frameList.size - 1).toFloat() / (sampleCount - 1).toFloat()
+                (0 until sampleCount).map { (it * step).toInt().coerceIn(0, frameList.size - 1) }.distinct()
+            }
+
+            val sampledPixels = mutableListOf<Int>()
+            for (idx in sampleIndices) {
+                val frame = frameList[idx]
+                val frameBytes = framesMap[frame.file] ?: continue
+                val bmp = decodeAndScaleBitmap(frameBytes, canvasWidth, canvasHeight) ?: continue
+                try {
+                    val w = bmp.width
+                    val h = bmp.height
+                    val totalPix = w * h
+                    val stride = (totalPix / 15000).coerceAtLeast(1)
+                    val pix = IntArray(totalPix)
+                    bmp.getPixels(pix, 0, w, 0, 0, w, h)
+                    for (p in 0 until totalPix step stride) {
+                        sampledPixels.add(pix[p])
+                    }
+                } finally {
+                    bmp.recycle()
+                }
+            }
+
+            val encoder = AnimatedGifEncoder()
+            encoder.setRepeat(0) // loop indefinitely
+            encoder.setQuality(2) // high precision palette
+            if (sampledPixels.isNotEmpty()) {
+                encoder.prepareGlobalPalette(sampledPixels.toIntArray())
+            }
+
+            var framesAdded = 0
             FileOutputStream(tempFile).use { fos ->
                 if (!encoder.start(fos)) {
                     throw IOException("Pixiv Ugoira: failed to initialize GIF encoder")
-                }
-
-                val frameList = if (meta.frames.isNotEmpty()) {
-                    meta.frames
-                } else {
-                    framesMap.keys.sorted().map { PixivUgoiraFrame(file = it, delay = 125) }
                 }
 
                 for (frame in frameList) {
                     val frameBytes = framesMap[frame.file] ?: continue
                     val bitmap = decodeAndScaleBitmap(frameBytes, canvasWidth, canvasHeight) ?: continue
                     try {
-                        if (framesAdded == 0) {
-                            canvasWidth = bitmap.width
-                            canvasHeight = bitmap.height
-                        }
                         encoder.setDelay(frame.delay.coerceAtLeast(10))
                         val added = encoder.addFrame(bitmap)
                         if (added) {
                             framesAdded++
+                        } else {
+                            throw IOException("Pixiv Ugoira: failed to encode frame ${frame.file}")
                         }
                     } finally {
                         bitmap.recycle()
                     }
                 }
 
-                encoder.finish()
+                if (!encoder.finish()) {
+                    throw IOException("Pixiv Ugoira: failed to finalize GIF trailer")
+                }
             }
 
-            if (framesAdded == 0 || !tempFile.exists() || tempFile.length() <= 100) {
-                throw IOException("Pixiv Ugoira: failed to encode GIF or no valid frames for $illustId")
+            if (framesAdded == 0 || !isValidGif(tempFile)) {
+                throw IOException("Pixiv Ugoira: generated GIF was incomplete or corrupt for $illustId")
             }
 
             if (cacheFile.exists()) cacheFile.delete()
-            tempFile.renameTo(cacheFile)
+            if (!tempFile.renameTo(cacheFile)) {
+                tempFile.copyTo(cacheFile, overwrite = true)
+                tempFile.delete()
+            }
         } finally {
             if (tempFile.exists()) tempFile.delete()
         }
@@ -141,12 +188,29 @@ internal class UgoiraInterceptor : Interceptor {
         return buildGifResponse(request, cacheFile)
     }
 
+    private fun isValidGif(file: File): Boolean {
+        if (!file.exists() || file.length() < 100) return false
+        return try {
+            java.io.RandomAccessFile(file, "r").use { raf ->
+                if (raf.length() < 100) return false
+                val header = ByteArray(6)
+                raf.readFully(header)
+                val headerStr = String(header)
+                if (headerStr != "GIF89a" && headerStr != "GIF87a") return false
+                raf.seek(raf.length() - 1)
+                raf.readByte() == 0x3B.toByte()
+            }
+        } catch (_: Exception) {
+            false
+        }
+    }
+
     private fun decodeAndScaleBitmap(bytes: ByteArray, targetW: Int = 0, targetH: Int = 0): Bitmap? {
         val boundsOpts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeByteArray(bytes, 0, bytes.size, boundsOpts)
         if (boundsOpts.outWidth <= 0 || boundsOpts.outHeight <= 0) return null
 
-        val maxDim = 800
+        val maxDim = 1080
         var sampleSize = 1
         var w = boundsOpts.outWidth
         var h = boundsOpts.outHeight

@@ -35,6 +35,8 @@ class Feeds(
         isLenient = true
     }
 
+    private val cursorCache = java.util.concurrent.ConcurrentHashMap<String, String>()
+
     /**
      * Popular feed: backed by DeviantArt backend RSS feed.
      */
@@ -137,7 +139,11 @@ class Feeds(
             fun buildUrl(token: String): HttpUrl {
                 val builder = "$baseUrl/_puppy/dabrowse/networkbar/$endpoint".toHttpUrl().newBuilder()
                     .addQueryParameter("csrf_token", token)
-                if (currentPage > 1) {
+                val cursorKey = "$endpoint-$currentPage"
+                val cachedCursor = cursorCache[cursorKey]
+                if (!cachedCursor.isNullOrBlank()) {
+                    builder.addQueryParameter("cursor", cachedCursor)
+                } else if (currentPage > 1) {
                     val cursorJson = "{\"offset\":$offset,\"vespa_content_group\":0}"
                     val cursor = cursorJson.encodeUtf8().base64()
                     builder.addQueryParameter("cursor", cursor)
@@ -146,7 +152,7 @@ class Feeds(
             }
 
             fun execute(token: String): Response {
-                val req = Request.Builder().url(buildUrl(token)).build()
+                val req = Request.Builder().url(buildUrl(token)).header("Referer", "$baseUrl/").build()
                 return HttpGuard.executeWithRetry("feed $endpoint") {
                     client.newCall(req).execute()
                 }
@@ -175,8 +181,11 @@ class Feeds(
                 throw IOException(LOGIN_REQUIRED_MESSAGE)
             }
 
-            val pageResult = parseNetworkbarJson(body)
-            hasMoreResults = pageResult.second
+            val pageResult = parseNetworkbarJsonWithCursor(body)
+            hasMoreResults = pageResult.second || !pageResult.third.isNullOrBlank()
+            if (!pageResult.third.isNullOrBlank()) {
+                cursorCache["$endpoint-${currentPage + 1}"] = pageResult.third!!
+            }
 
             for (manga in pageResult.first) {
                 if (seenUrls.add(manga.url)) {
@@ -194,20 +203,23 @@ class Feeds(
     }
 
     /**
-     * Parses the deviations JSON returned by networkbar endpoints.
+     * Parses the deviations JSON returned by networkbar endpoints with cursor extraction.
      */
-    fun parseNetworkbarJson(body: String): Pair<List<SManga>, Boolean> {
+    fun parseNetworkbarJsonWithCursor(body: String): Triple<List<SManga>, Boolean, String?> {
         val root = try {
             json.parseToJsonElement(body).jsonObject
         } catch (_: Exception) {
-            return Pair(emptyList(), false)
+            return Triple(emptyList(), false, null)
         }
 
         val deviationsArray = root["deviations"]?.jsonArray
             ?: root["results"]?.jsonArray
-            ?: return Pair(emptyList(), false)
+            ?: return Triple(emptyList(), false, null)
 
         val hasMore = root["hasMore"]?.jsonPrimitive?.booleanOrNull ?: false
+        val nextCursor = root["cursor"]?.jsonPrimitive?.contentOrNull
+            ?: root["nextCursor"]?.jsonPrimitive?.contentOrNull
+            ?: root["next_cursor"]?.jsonPrimitive?.contentOrNull
         val mangas = mutableListOf<SManga>()
 
         for (el in deviationsArray) {
@@ -244,6 +256,14 @@ class Feeds(
             )
         }
 
+        return Triple(mangas, hasMore, nextCursor)
+    }
+
+    /**
+     * Parses the deviations JSON returned by networkbar endpoints.
+     */
+    fun parseNetworkbarJson(body: String): Pair<List<SManga>, Boolean> {
+        val (mangas, hasMore, _) = parseNetworkbarJsonWithCursor(body)
         return Pair(mangas, hasMore)
     }
 

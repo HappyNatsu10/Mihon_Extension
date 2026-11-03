@@ -5,6 +5,7 @@ import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -52,6 +53,7 @@ private val jsonParser = Json {
 fun extractTextOrHtmlFromDraftOrTiptap(raw: String): String {
     val trimmed = raw.trim()
     if (!trimmed.startsWith("{") && !trimmed.startsWith("{\\")) return raw
+    if (trimmed.length < 10) return "" // Discard corrupt stubs like "{\" or "{\\"
 
     // 1. Check for 'excerpt' in JSON structure
     val excerptRegex = Regex(""""excerpt"\s*:\s*"((?:\\.|[^"\\])*)"""")
@@ -63,10 +65,9 @@ fun extractTextOrHtmlFromDraftOrTiptap(raw: String): String {
             .replace("\\'", "'")
             .replace("\\/", "/")
             .replace("\\\\", "\\")
-        if (excerpt.isNotBlank()) return excerpt
+        if (excerpt.isNotBlank() && !excerpt.startsWith("{")) return excerpt
     }
 
-    // 2. Try parsing TipTap / ProseMirror AST
     try {
         val unescaped = if (trimmed.startsWith("{\\")) {
             trimmed.replace("\\\"", "\"").replace("\\'", "'").replace("\\/", "/").replace("\\\\", "\\")
@@ -74,6 +75,119 @@ fun extractTextOrHtmlFromDraftOrTiptap(raw: String): String {
             trimmed
         }
         val element = jsonParser.parseToJsonElement(unescaped)
+        val rootObj = element as? JsonObject
+
+        // 2. Parse Draft.js AST (used by DeviantArt for Literature, Captions, Journals, & modern editor posts)
+        val blocks = rootObj?.get("blocks")?.jsonArray
+        if (blocks != null) {
+            val entityMap = rootObj["entityMap"]?.jsonObject
+            val sb = StringBuilder()
+            for (blockEl in blocks) {
+                val block = blockEl as? JsonObject ?: continue
+                val text = block["text"]?.jsonPrimitive?.contentOrNull.orEmpty()
+                val blockType = block["type"]?.jsonPrimitive?.contentOrNull ?: "unstyled"
+                val styleRanges = block["inlineStyleRanges"]?.jsonArray
+                val entityRanges = block["entityRanges"]?.jsonArray
+
+                if (text.isBlank() && entityRanges.isNullOrEmpty()) {
+                    sb.append("<p><br/></p>")
+                    continue
+                }
+
+                // Apply character-level styles
+                val charStyles = Array(text.length) { mutableSetOf<String>() }
+                styleRanges?.forEach { sr ->
+                    val sObj = sr as? JsonObject ?: return@forEach
+                    val style = sObj["style"]?.jsonPrimitive?.contentOrNull.orEmpty()
+                    val offset = sObj["offset"]?.jsonPrimitive?.intOrNull ?: 0
+                    val length = sObj["length"]?.jsonPrimitive?.intOrNull ?: 0
+                    for (i in offset until minOf(text.length, offset + length)) {
+                        charStyles[i].add(style)
+                    }
+                }
+
+                // Apply entity ranges (LINK)
+                val entityAtChar = arrayOfNulls<String>(text.length)
+                entityRanges?.forEach { er ->
+                    val eObj = er as? JsonObject ?: return@forEach
+                    val eKey = eObj["key"]?.jsonPrimitive?.contentOrNull
+                        ?: eObj["key"]?.jsonPrimitive?.intOrNull?.toString()
+                    val offset = eObj["offset"]?.jsonPrimitive?.intOrNull ?: 0
+                    val length = eObj["length"]?.jsonPrimitive?.intOrNull ?: 0
+                    if (eKey != null) {
+                        for (i in offset until minOf(text.length, offset + length)) {
+                            entityAtChar[i] = eKey
+                        }
+                    }
+                }
+
+                val blockHtml = StringBuilder()
+                var curIdx = 0
+                while (curIdx < text.length) {
+                    val styles = charStyles[curIdx]
+                    val entKey = entityAtChar[curIdx]
+                    var runEnd = curIdx + 1
+                    while (runEnd < text.length && charStyles[runEnd] == styles && entityAtChar[runEnd] == entKey) {
+                        runEnd++
+                    }
+                    val chunk = text.substring(curIdx, runEnd)
+                        .replace("&", "&amp;")
+                        .replace("<", "&lt;")
+                        .replace(">", "&gt;")
+
+                    var styledChunk = chunk
+                    if ("BOLD" in styles) styledChunk = "<b>$styledChunk</b>"
+                    if ("ITALIC" in styles) styledChunk = "<i>$styledChunk</i>"
+                    if ("UNDERLINE" in styles) styledChunk = "<u>$styledChunk</u>"
+
+                    if (entKey != null && entityMap != null) {
+                        val ent = entityMap[entKey]?.jsonObject
+                        val entType = ent?.get("type")?.jsonPrimitive?.contentOrNull.orEmpty()
+                        if (entType.equals("LINK", ignoreCase = true)) {
+                            styledChunk = "<font color=\"#0570e6\"><u>$styledChunk</u></font>"
+                        }
+                    }
+                    blockHtml.append(styledChunk)
+                    curIdx = runEnd
+                }
+
+                // Check for inline/block images in entityRanges
+                val embeddedImages = mutableListOf<String>()
+                entityRanges?.forEach { er ->
+                    val eKey = er.jsonObject["key"]?.jsonPrimitive?.contentOrNull
+                        ?: er.jsonObject["key"]?.jsonPrimitive?.intOrNull?.toString()
+                    if (eKey != null && entityMap != null) {
+                        val ent = entityMap[eKey]?.jsonObject
+                        val eType = ent?.get("type")?.jsonPrimitive?.contentOrNull.orEmpty()
+                        if (eType.equals("IMAGE", ignoreCase = true) || eType.contains("image", ignoreCase = true)) {
+                            val src = ent?.get("data")?.jsonObject?.get("src")?.jsonPrimitive?.contentOrNull
+                                ?: ent?.get("data")?.jsonObject?.get("url")?.jsonPrimitive?.contentOrNull
+                            if (!src.isNullOrBlank() && !embeddedImages.contains(src)) {
+                                embeddedImages.add(src)
+                            }
+                        }
+                    }
+                }
+
+                when (blockType) {
+                    "header-one" -> sb.append("<h1>").append(blockHtml).append("</h1>")
+                    "header-two" -> sb.append("<h2>").append(blockHtml).append("</h2>")
+                    "unordered-list-item" -> sb.append("<li>").append(blockHtml).append("</li>")
+                    "ordered-list-item" -> sb.append("<li>").append(blockHtml).append("</li>")
+                    "blockquote" -> sb.append("<blockquote>").append(blockHtml).append("</blockquote>")
+                    else -> sb.append("<p>").append(blockHtml).append("</p>")
+                }
+
+                for (imgSrc in embeddedImages) {
+                    sb.append("<p><img src=\"$imgSrc\"/></p>")
+                }
+            }
+
+            val res = sb.toString().trim()
+            if (res.isNotBlank()) return res
+        }
+
+        // 3. Try parsing TipTap / ProseMirror AST
         val sb = StringBuilder()
         fun walk(node: JsonElement) {
             when (node) {
@@ -83,10 +197,11 @@ fun extractTextOrHtmlFromDraftOrTiptap(raw: String): String {
                         "text" -> {
                             val txt = node["text"]?.jsonPrimitive?.contentOrNull.orEmpty()
                             val marks = node["marks"]?.jsonArray?.mapNotNull { it.jsonObject["type"]?.jsonPrimitive?.contentOrNull }.orEmpty()
-                            var styled = txt
+                            var styled = txt.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
                             if ("bold" in marks) styled = "<b>$styled</b>"
                             if ("italic" in marks) styled = "<i>$styled</i>"
                             if ("underline" in marks) styled = "<u>$styled</u>"
+                            if ("link" in marks) styled = "<font color=\"#0570e6\"><u>$styled</u></font>"
                             sb.append(styled)
                         }
                         "image" -> {
@@ -148,10 +263,10 @@ fun cleanDescriptionHtml(html: String): String {
     if (html.isBlank()) return ""
     var content = html.trim()
     if (content == "{\\" || content.startsWith("{\\") ||
-        (content.startsWith("{") && (content.contains("\"type\"") || content.contains("\"version\"") || content.contains("\"excerpt\"")))
+        (content.startsWith("{") && (content.contains("\"type\"") || content.contains("\"version\"") || content.contains("\"excerpt\"") || content.contains("\"blocks\"")))
     ) {
         content = extractTextOrHtmlFromDraftOrTiptap(content)
-        if (content.isBlank()) return ""
+        if (content.isBlank() || content == "{\\" || content.startsWith("{\\")) return ""
     }
 
     val doc = Jsoup.parseBodyFragment(content)

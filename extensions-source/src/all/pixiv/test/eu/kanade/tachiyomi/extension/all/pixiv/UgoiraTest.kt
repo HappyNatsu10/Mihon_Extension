@@ -1,10 +1,12 @@
 package eu.kanade.tachiyomi.extension.all.pixiv
 
+import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
+import javax.imageio.ImageIO
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
-import java.io.ByteArrayOutputStream
 
 class UgoiraTest {
 
@@ -61,5 +63,18 @@ class UgoiraTest {
 
         // Trailer check: 0x3B (';')
         assertEquals(0x3B.toByte(), bytes.last())
+
+        // Read back with Java ImageIO
+        val stream = ByteArrayInputStream(bytes)
+        val reader = ImageIO.getImageReadersByFormatName("gif").next()
+        reader.input = ImageIO.createImageInputStream(stream)
+        val numImages = reader.getNumImages(true)
+        assertEquals(2, numImages)
+        val img0 = reader.read(0)
+        assertNotNull(img0)
+        assertEquals(50, img0.width)
+        val img1 = reader.read(1)
+        assertNotNull(img1)
+        assertEquals(50, img1.width)
     }
 }

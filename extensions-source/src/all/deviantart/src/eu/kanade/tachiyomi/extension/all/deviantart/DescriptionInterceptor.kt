@@ -2,12 +2,15 @@ package eu.kanade.tachiyomi.extension.all.deviantart
 
 import okhttp3.Interceptor
 import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
 import okhttp3.Protocol
+import okhttp3.Request
 import okhttp3.Response
 import okhttp3.ResponseBody.Companion.toResponseBody
 import java.io.IOException
 
 class DescriptionInterceptor(
+    private val clientProvider: () -> OkHttpClient,
     private val fetchFallback: (devId: String) -> ArtworkDescription?,
     private val maxPagesProvider: () -> Int = { 3 },
 ) : Interceptor {
@@ -44,8 +47,11 @@ class DescriptionInterceptor(
 
         val fetchImage: (String) -> ByteArray? = { imgUrl ->
             try {
-                val imgReq = request.newBuilder().url(imgUrl).build()
-                val imgResp = chain.proceed(imgReq)
+                val imgReq = Request.Builder()
+                    .url(imgUrl)
+                    .header("Referer", "https://www.deviantart.com/")
+                    .build()
+                val imgResp = clientProvider().newCall(imgReq).execute()
                 if (imgResp.isSuccessful) {
                     imgResp.body.bytes()
                 } else {

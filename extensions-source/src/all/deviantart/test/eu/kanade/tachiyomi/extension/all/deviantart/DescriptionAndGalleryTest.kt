@@ -145,4 +145,49 @@ class DescriptionAndGalleryTest {
             assertEquals((total - index).toFloat(), chapter.chapter_number, 0.001f)
         }
     }
+
+    @Test
+    fun testDraftJsParsing() {
+        val draftJs = """
+            {
+              "blocks": [
+                {
+                  "key": "abc",
+                  "text": "My six hundred and ninetieth caption. A quick snooze...",
+                  "type": "unstyled",
+                  "inlineStyleRanges": [
+                    {"offset": 0, "length": 2, "style": "BOLD"}
+                  ],
+                  "entityRanges": []
+                }
+              ],
+              "entityMap": {}
+            }
+        """.trimIndent()
+        val cleaned = cleanDescriptionHtml(draftJs)
+        assertTrue(cleaned.contains("<b>My</b> six hundred and ninetieth caption."))
+    }
+
+    @Test
+    fun testParseMediaUnwrapsNestedMedia() {
+        val api = DeviantArtApi(okhttp3.OkHttpClient())
+        val jsonStr = """
+            {
+                "fileId": 12345,
+                "media": {
+                    "baseUri": "https://images-wixmp.com/f/abc/xyz.jpg",
+                    "prettyName": "nested_sample",
+                    "token": ["tok1"],
+                    "types": [
+                        {"t": "fullview", "c": "/v1/fill/<prettyName>.jpg", "w": 1000, "h": 800}
+                    ]
+                }
+            }
+        """.trimIndent()
+        val el = kotlinx.serialization.json.Json.parseToJsonElement(jsonStr)
+        val parsed = api.parseMedia(el)
+        org.junit.Assert.assertNotNull(parsed)
+        assertEquals("https://images-wixmp.com/f/abc/xyz.jpg", parsed?.baseUri)
+        assertEquals("nested_sample", parsed?.prettyName)
+    }
 }

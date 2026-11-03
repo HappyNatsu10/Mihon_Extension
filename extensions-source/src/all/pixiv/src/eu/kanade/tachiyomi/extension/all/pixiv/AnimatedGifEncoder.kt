@@ -28,6 +28,10 @@ internal class AnimatedGifEncoder {
     private var firstFrame = true
     private var sample = 10 // quality sample (1 = best, 30 = fastest)
 
+    // Global Color Table & Fast RGB555 Lookup Cache
+    private var colorLookup: ByteArray? = null
+    private var hasGlobalPalette = false
+
     fun setDelay(ms: Int) {
         delay = (ms + 5) / 10
         if (delay < 1) delay = 1
@@ -43,6 +47,74 @@ internal class AnimatedGifEncoder {
 
     fun setQuality(quality: Int) {
         sample = if (quality < 1) 1 else quality
+    }
+
+    /**
+     * Prepares an optimal Global Color Table from sampled pixels across animation frames,
+     * and compiles an ultra-fast O(1) 32K RGB555 lookup cache.
+     */
+    fun prepareGlobalPalette(sampledPixels: IntArray) {
+        if (sampledPixels.isEmpty()) return
+        val len = sampledPixels.size * 3
+        val bArray = ByteArray(len)
+        var idx = 0
+        for (c in sampledPixels) {
+            bArray[idx++] = (c and 0xFF).toByte() // B
+            bArray[idx++] = ((c shr 8) and 0xFF).toByte() // G
+            bArray[idx++] = ((c shr 16) and 0xFF).toByte() // R
+        }
+
+        val nq = NeuQuant(bArray, len, sample)
+        val palette = nq.process()
+
+        // Swap B and R for GIF specification (R, G, B order)
+        for (i in 0 until palette.size step 3) {
+            val temp = palette[i]
+            palette[i] = palette[i + 2]
+            palette[i + 2] = temp
+        }
+
+        colorTab = palette
+        buildRgb555Lookup(palette)
+        hasGlobalPalette = true
+    }
+
+    private fun buildRgb555Lookup(palette: ByteArray) {
+        val lut = ByteArray(32768)
+        val numColors = palette.size / 3
+        val pr = IntArray(numColors)
+        val pg = IntArray(numColors)
+        val pb = IntArray(numColors)
+        for (i in 0 until numColors) {
+            pr[i] = palette[i * 3].toInt() and 0xFF
+            pg[i] = palette[i * 3 + 1].toInt() and 0xFF
+            pb[i] = palette[i * 3 + 2].toInt() and 0xFF
+        }
+
+        for (code in 0 until 32768) {
+            val r5 = (code shr 10) and 0x1F
+            val g5 = (code shr 5) and 0x1F
+            val b5 = code and 0x1F
+            val r = (r5 * 255 + 15) / 31
+            val g = (g5 * 255 + 15) / 31
+            val b = (b5 * 255 + 15) / 31
+
+            var bestDist = Int.MAX_VALUE
+            var bestIdx = 0
+            for (i in 0 until numColors) {
+                val dr = r - pr[i]
+                val dg = g - pg[i]
+                val db = b - pb[i]
+                val dist = dr * dr + dg * dg + db * db
+                if (dist < bestDist) {
+                    bestDist = dist
+                    bestIdx = i
+                    if (dist == 0) break
+                }
+            }
+            lut[code] = bestIdx.toByte()
+        }
+        colorLookup = lut
     }
 
     fun start(os: OutputStream): Boolean {
@@ -67,21 +139,34 @@ internal class AnimatedGifEncoder {
             if (firstFrame) {
                 width = frameWidth
                 height = frameHeight
-            }
-            getImagePixels(rgb)
-            analyzePixels()
-            if (firstFrame) {
+                if (!hasGlobalPalette) {
+                    prepareGlobalPalette(rgb)
+                }
                 writeLSD()
                 writePalette()
                 if (repeat >= 0) {
                     writeNetscapeExt()
                 }
             }
+
+            // Map frame pixels instantly using the RGB555 lookup cache
+            val count = frameWidth * frameHeight
+            if (indexedPixels == null || indexedPixels!!.size < count) {
+                indexedPixels = ByteArray(count)
+            }
+            val idx = indexedPixels!!
+            val lut = colorLookup ?: throw IllegalStateException("Color lookup table not initialized")
+            for (i in 0 until count) {
+                val c = rgb[i]
+                val r5 = (c shr 19) and 0x1F
+                val g5 = (c shr 11) and 0x1F
+                val b5 = (c shr 3) and 0x1F
+                val code = (r5 shl 10) or (g5 shl 5) or b5
+                idx[i] = lut[code]
+            }
+
             writeGraphicCtrlExt()
             writeImageDesc()
-            if (!firstFrame) {
-                writePalette()
-            }
             writePixels()
             firstFrame = false
             return true
@@ -106,6 +191,8 @@ internal class AnimatedGifEncoder {
         pixels = null
         indexedPixels = null
         colorTab = null
+        colorLookup = null
+        hasGlobalPalette = false
         firstFrame = true
         return ok
     }
@@ -206,11 +293,7 @@ internal class AnimatedGifEncoder {
         writeShort(0) // image top
         writeShort(width) // image width
         writeShort(height) // image height
-        if (firstFrame) {
-            out!!.write(0) // no local color table
-        } else {
-            out!!.write(0x80 or 0 or 0 or 0 or palSize) // local color table
-        }
+        out!!.write(0) // no local color table; all frames use the high-quality Global Color Table
     }
 
     private fun writeLSD() {
