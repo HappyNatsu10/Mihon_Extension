@@ -537,32 +537,160 @@ class DeviantArtApi(
         }
     }
 
+    fun decodeJsStringLiteral(s: String): String {
+        val sb = StringBuilder(s.length)
+        var i = 0
+        val n = s.length
+        while (i < n) {
+            val c = s[i]
+            if (c == '\\' && i + 1 < n) {
+                when (val nxt = s[i + 1]) {
+                    '"' -> {
+                        sb.append('"')
+                        i += 2
+                    }
+                    '\\' -> {
+                        sb.append('\\')
+                        i += 2
+                    }
+                    '/' -> {
+                        sb.append('/')
+                        i += 2
+                    }
+                    '\'' -> {
+                        sb.append('\'')
+                        i += 2
+                    }
+                    'n' -> {
+                        sb.append('\n')
+                        i += 2
+                    }
+                    'r' -> {
+                        sb.append('\r')
+                        i += 2
+                    }
+                    't' -> {
+                        sb.append('\t')
+                        i += 2
+                    }
+                    'b' -> {
+                        sb.append('\b')
+                        i += 2
+                    }
+                    'f' -> {
+                        sb.append('\u000c')
+                        i += 2
+                    }
+                    'u' -> {
+                        if (i + 5 <= n) {
+                            val hex = s.substring(i + 2, i + 6)
+                            val code = hex.toIntOrNull(16)
+                            if (code != null) {
+                                sb.append(code.toChar())
+                                i += 6
+                            } else {
+                                sb.append(nxt)
+                                i += 2
+                            }
+                        } else {
+                            sb.append(nxt)
+                            i += 2
+                        }
+                    }
+                    'x' -> {
+                        if (i + 3 <= n) {
+                            val hex = s.substring(i + 2, i + 4)
+                            val code = hex.toIntOrNull(16)
+                            if (code != null) {
+                                sb.append(code.toChar())
+                                i += 4
+                            } else {
+                                sb.append(nxt)
+                                i += 2
+                            }
+                        } else {
+                            sb.append(nxt)
+                            i += 2
+                        }
+                    }
+                    else -> {
+                        sb.append(nxt)
+                        i += 2
+                    }
+                }
+            } else {
+                sb.append(c)
+                i++
+            }
+        }
+        return sb.toString()
+    }
+
+    fun extractInitialStateJson(html: String): JsonObject? {
+        val marker = "window.__INITIAL_STATE__ = JSON.parse(\""
+        val start = html.indexOf(marker)
+        if (start != -1) {
+            val startIdx = start + marker.length
+            val n = html.length
+            var i = startIdx
+            var endIdx = -1
+            while (i < n) {
+                val c = html[i]
+                if (c == '\\') {
+                    i += 2
+                } else if (c == '"') {
+                    if (i + 2 < n && html[i + 1] == ')' && html[i + 2] == ';') {
+                        endIdx = i
+                        break
+                    }
+                    i++
+                } else {
+                    i++
+                }
+            }
+            if (endIdx != -1) {
+                val raw = html.substring(startIdx, endIdx)
+                val decoded = decodeJsStringLiteral(raw)
+                return try {
+                    json.parseToJsonElement(decoded).jsonObject
+                } catch (_: Exception) {
+                    null
+                }
+            }
+        }
+
+        val objMarker = "window.__INITIAL_STATE__ = {"
+        val objStart = html.indexOf(objMarker)
+        if (objStart != -1) {
+            val startIdx = objStart + objMarker.length - 1
+            val scriptEnd = html.indexOf("</script>", startIdx).takeIf { it != -1 } ?: html.length
+            val endIdx = html.lastIndexOf("};", scriptEnd)
+            if (endIdx != -1) {
+                val raw = html.substring(startIdx, endIdx + 1)
+                return try {
+                    json.parseToJsonElement(raw).jsonObject
+                } catch (_: Exception) {
+                    null
+                }
+            }
+        }
+        return null
+    }
+
     fun extractDeviationMediaFromHtml(html: String, devId: String): Pair<Media?, List<Media>> {
         var primary: Media? = null
         val additional = mutableListOf<Media>()
 
         // 1. Extract from window.__INITIAL_STATE__
         try {
-            val marker = "window.__INITIAL_STATE__ = JSON.parse(\""
-            val start = html.indexOf(marker)
-            if (start != -1) {
-                val startIdx = start + marker.length
-                var endIdx = html.indexOf("\");\n", startIdx)
-                if (endIdx == -1) endIdx = html.indexOf("\");\r\n", startIdx)
-                if (endIdx == -1) endIdx = html.indexOf("\");window.__", startIdx)
-                if (endIdx == -1) endIdx = html.indexOf("\");", startIdx).takeIf { it > startIdx } ?: html.length
-
-                val escaped = html.substring(startIdx, endIdx).replace("\\'", "'")
-                val rawJson = json.decodeFromString<String>("\"$escaped\"")
-                val root = json.parseToJsonElement(rawJson).jsonObject
-                val devObj = root["@@entities"]?.jsonObject?.get("deviation")?.jsonObject?.get(devId)?.jsonObject
-                if (devObj != null) {
-                    primary = parseMedia(devObj["media"])
-                    val extra = devObj["additionalMedia"]?.jsonArray?.mapNotNull { parseMedia(it) }.orEmpty()
-                    additional.addAll(extra)
-                    if (primary != null) {
-                        return Pair(primary, additional)
-                    }
+            val root = extractInitialStateJson(html)
+            val devObj = root?.get("@@entities")?.jsonObject?.get("deviation")?.jsonObject?.get(devId)?.jsonObject
+            if (devObj != null) {
+                primary = parseMedia(devObj["media"])
+                val extra = devObj["additionalMedia"]?.jsonArray?.mapNotNull { parseMedia(it) }.orEmpty()
+                additional.addAll(extra)
+                if (primary != null) {
+                    return Pair(primary, additional)
                 }
             }
         } catch (_: Exception) {}
@@ -696,28 +824,21 @@ class DeviantArtApi(
         // 1. Try extracting rich description or literature body from window.__INITIAL_STATE__
         var rawText = ""
         try {
-            val marker = "window.__INITIAL_STATE__ = JSON.parse(\""
-            val start = html.indexOf(marker)
-            if (start != -1) {
-                val startIdx = start + marker.length
-                var endIdx = html.indexOf("\");\n", startIdx)
-                if (endIdx == -1) endIdx = html.indexOf("\");\r\n", startIdx)
-                if (endIdx == -1) endIdx = html.indexOf("\");window.__", startIdx)
-                if (endIdx == -1) endIdx = html.indexOf("\");", startIdx).takeIf { it > startIdx } ?: html.length
-                val escaped = html.substring(startIdx, endIdx).replace("\\'", "'")
-                val rawJson = json.decodeFromString<String>("\"$escaped\"")
-                val root = json.parseToJsonElement(rawJson).jsonObject
-                val devExt = root["@@entities"]?.jsonObject?.get("deviationExtended")?.jsonObject?.get(devId)?.jsonObject
-                    ?: root["@@entities"]?.jsonObject?.get("deviation")?.jsonObject?.get(devId)?.jsonObject?.get("extended")?.jsonObject
-                if (devExt != null) {
-                    val markup = devExt["body"]?.jsonObject?.get("markup")?.jsonPrimitive?.contentOrNull
-                        ?: devExt["description"]?.jsonObject?.get("markup")?.jsonPrimitive?.contentOrNull
-                    val htmlContent = devExt["bodyText"]?.jsonObject?.get("html")?.jsonPrimitive?.contentOrNull
-                        ?: devExt["descriptionText"]?.jsonObject?.get("html")?.jsonPrimitive?.contentOrNull
-                    val candidate = markup ?: htmlContent
-                    if (!candidate.isNullOrBlank()) {
-                        rawText = cleanDescriptionHtml(candidate)
-                    }
+            val root = extractInitialStateJson(html)
+            val devExt = root?.get("@@entities")?.jsonObject?.get("deviationExtended")?.jsonObject?.get(devId)?.jsonObject
+                ?: root?.get("@@entities")?.jsonObject?.get("deviation")?.jsonObject?.get(devId)?.jsonObject?.get("extended")?.jsonObject
+            if (devExt != null) {
+                val candidate = devExt["descriptionText"]?.jsonObject?.get("html")?.jsonObject?.get("markup")?.jsonPrimitive?.contentOrNull
+                    ?: devExt["bodyText"]?.jsonObject?.get("html")?.jsonObject?.get("markup")?.jsonPrimitive?.contentOrNull
+                    ?: devExt["body"]?.jsonObject?.get("markup")?.jsonPrimitive?.contentOrNull
+                    ?: devExt["description"]?.jsonObject?.get("markup")?.jsonPrimitive?.contentOrNull
+                    ?: devExt["description"]?.jsonObject?.get("draft")?.jsonPrimitive?.contentOrNull
+                    ?: devExt["description"]?.jsonObject?.get("html")?.jsonObject?.get("markup")?.jsonPrimitive?.contentOrNull
+                    ?: devExt["bodyText"]?.jsonObject?.get("html")?.jsonPrimitive?.contentOrNull
+                    ?: devExt["descriptionText"]?.jsonObject?.get("html")?.jsonPrimitive?.contentOrNull
+                    ?: devExt["descriptionText"]?.jsonObject?.get("excerpt")?.jsonPrimitive?.contentOrNull
+                if (!candidate.isNullOrBlank()) {
+                    rawText = cleanDescriptionHtml(candidate)
                 }
             }
         } catch (_: Exception) {}

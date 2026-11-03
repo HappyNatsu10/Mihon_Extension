@@ -35,8 +35,6 @@ class Feeds(
         isLenient = true
     }
 
-    private val cursorCache = java.util.concurrent.ConcurrentHashMap<String, String>()
-
     /**
      * Popular feed: backed by DeviantArt backend RSS feed.
      */
@@ -145,7 +143,7 @@ class Feeds(
                     builder.addQueryParameter("cursor", cachedCursor)
                 } else if (currentPage > 1) {
                     val cursorJson = "{\"offset\":$offset,\"vespa_content_group\":0}"
-                    val cursor = cursorJson.encodeUtf8().base64()
+                    val cursor = cursorJson.encodeUtf8().base64().trimEnd('=')
                     builder.addQueryParameter("cursor", cursor)
                 }
                 return builder.build()
@@ -277,18 +275,7 @@ class Feeds(
         }
         val html = response.use { it.body.string() }
         api.updateCsrfFromHtml(html)
-        val marker = "window.__INITIAL_STATE__ = JSON.parse(\""
-        val start = html.indexOf(marker)
-        if (start == -1) throw IOException("Failed to load home page")
-
-        val startIdx = start + marker.length
-        var endIdx = html.indexOf("\");\n", startIdx)
-        if (endIdx == -1) endIdx = html.indexOf("\");\r\n", startIdx)
-        if (endIdx == -1) endIdx = html.indexOf("\");window.__", startIdx)
-        if (endIdx == -1) endIdx = html.indexOf("\");", startIdx).takeIf { it > startIdx } ?: html.length
-        val escaped = html.substring(startIdx, endIdx).replace("\\'", "'")
-        val rawJson = json.decodeFromString<String>("\"$escaped\"")
-        val root = json.parseToJsonElement(rawJson).jsonObject
+        val root = api.extractInitialStateJson(html) ?: throw IOException("Failed to load home page state")
         val entities = root["@@entities"]?.jsonObject
         val devMap = entities?.get("deviation")?.jsonObject ?: throw IOException("No deviations in home page")
         val userMap = entities["user"]?.jsonObject
@@ -417,5 +404,6 @@ class Feeds(
         const val LOGIN_REQUIRED_MESSAGE = "Log in to DeviantArt: open this source in WebView (globe icon), sign in, then try again."
         private const val FEED_PAGE_SIZE = 60
         private const val NETWORKBAR_PAGE_SIZE = 24
+        private val cursorCache = java.util.concurrent.ConcurrentHashMap<String, String>()
     }
 }

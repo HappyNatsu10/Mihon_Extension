@@ -363,9 +363,6 @@ abstract class DeviantArt :
                 throw e
             }
         }
-        if (images.isEmpty()) {
-            throw IOException("This artwork is not available without login")
-        }
 
         val pages = images.mapIndexed { index, imgUrl ->
             Page(index, url = chapterUrl, imageUrl = imgUrl)
@@ -393,6 +390,10 @@ abstract class DeviantArt :
                     }
                 }
             }
+        }
+
+        if (pages.isEmpty()) {
+            throw IOException("This artwork is not available without login, or has no viewable pages")
         }
 
         return pages

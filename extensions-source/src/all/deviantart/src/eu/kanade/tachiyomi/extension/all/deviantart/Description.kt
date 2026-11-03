@@ -55,10 +55,10 @@ fun extractTextOrHtmlFromDraftOrTiptap(raw: String): String {
     if (!trimmed.startsWith("{") && !trimmed.startsWith("{\\")) return raw
     if (trimmed.length < 10) return "" // Discard corrupt stubs like "{\" or "{\\"
 
-    // 1. Check for 'excerpt' in JSON structure
+    // 1. Check for 'excerpt' in JSON structure (only if no full rich document or blocks AST)
     val excerptRegex = Regex(""""excerpt"\s*:\s*"((?:\\.|[^"\\])*)"""")
     val excerptMatch = excerptRegex.find(trimmed)
-    if (excerptMatch != null) {
+    if (excerptMatch != null && !trimmed.contains("\"document\"") && !trimmed.contains("\"blocks\"")) {
         val excerpt = excerptMatch.groupValues[1]
             .replace("\\n", "\n")
             .replace("\\\"", "\"")
@@ -197,7 +197,7 @@ fun extractTextOrHtmlFromDraftOrTiptap(raw: String): String {
                         "text" -> {
                             val txt = node["text"]?.jsonPrimitive?.contentOrNull.orEmpty()
                             val marks = node["marks"]?.jsonArray?.mapNotNull { it.jsonObject["type"]?.jsonPrimitive?.contentOrNull }.orEmpty()
-                            var styled = txt.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                            var styled = txt.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\n", "<br/>")
                             if ("bold" in marks) styled = "<b>$styled</b>"
                             if ("italic" in marks) styled = "<i>$styled</i>"
                             if ("underline" in marks) styled = "<u>$styled</u>"
@@ -206,6 +206,7 @@ fun extractTextOrHtmlFromDraftOrTiptap(raw: String): String {
                         }
                         "image" -> {
                             val src = node["attrs"]?.jsonObject?.get("src")?.jsonPrimitive?.contentOrNull
+                                ?: node["attrs"]?.jsonObject?.get("url")?.jsonPrimitive?.contentOrNull
                             if (!src.isNullOrBlank()) {
                                 sb.append("<p><img src=\"$src\"/></p>")
                             }
@@ -263,7 +264,7 @@ fun cleanDescriptionHtml(html: String): String {
     if (html.isBlank()) return ""
     var content = html.trim()
     if (content == "{\\" || content.startsWith("{\\") ||
-        (content.startsWith("{") && (content.contains("\"type\"") || content.contains("\"version\"") || content.contains("\"excerpt\"") || content.contains("\"blocks\"")))
+        (content.startsWith("{") && (content.contains("\"type\"") || content.contains("\"version\"") || content.contains("\"excerpt\"") || content.contains("\"blocks\"") || content.contains("\"document\"")))
     ) {
         content = extractTextOrHtmlFromDraftOrTiptap(content)
         if (content.isBlank() || content == "{\\" || content.startsWith("{\\")) return ""

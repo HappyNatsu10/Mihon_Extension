@@ -173,20 +173,13 @@ object GalleryCache {
             var offset = validCached?.nextOffset ?: partialItems.size
             var pagesSinceSave = 0
             val crawlStartTime = System.currentTimeMillis()
+            var hasMore = true
 
             try {
                 while (true) {
                     // Check 4-minute time budget (FR-12 item 7)
                     if (System.currentTimeMillis() - crawlStartTime > MAX_CRAWL_DURATION_MS) {
-                        saveCache(
-                            user,
-                            folderId,
-                            isFavourites,
-                            GalleryCacheData(schemaVersion = 2, complete = false, items = partialItems, nextOffset = offset),
-                        )
-                        throw IOException(
-                            "Loading gallery: ${partialItems.size} artworks cached so far. Update again to continue.",
-                        )
+                        break
                     }
 
                     var pageResult = fetchPageResult(offset)
@@ -199,15 +192,11 @@ object GalleryCache {
                         } catch (_: InterruptedException) {}
                         pageResult = fetchPageResult(offset)
                         page = pageResult.items
-                        if (page.isEmpty() && pageResult.hasNextPage) {
-                            saveCache(
-                                user,
-                                folderId,
-                                isFavourites,
-                                GalleryCacheData(schemaVersion = 2, complete = false, items = partialItems, nextOffset = offset),
-                            )
-                            throw IOException("Gallery crawl paused at offset $offset: unexpected empty page. Update again to resume.")
-                        }
+                    }
+
+                    if (page.isEmpty()) {
+                        hasMore = false
+                        break
                     }
 
                     for (item in page) {
@@ -217,7 +206,7 @@ object GalleryCache {
                     }
 
                     pagesSinceSave++
-                    if (pagesSinceSave >= 20) {
+                    if (pagesSinceSave >= 5) {
                         saveCache(
                             user,
                             folderId,
@@ -229,6 +218,7 @@ object GalleryCache {
 
                     if (!pageResult.hasNextPage) {
                         // Reached genuine end of gallery
+                        hasMore = false
                         break
                     }
 
@@ -242,11 +232,12 @@ object GalleryCache {
                     offset = nextOffsetFromLink ?: (offset + page.size)
                 }
 
+                val isComplete = !hasMore
                 saveCache(
                     user,
                     folderId,
                     isFavourites,
-                    GalleryCacheData(schemaVersion = 2, complete = true, items = partialItems, nextOffset = null),
+                    GalleryCacheData(schemaVersion = 2, complete = isComplete, items = partialItems, nextOffset = if (isComplete) null else offset),
                 )
                 // Reconcile with permanent ChapterLedger
                 ChapterLedger.recordChapters(user, folderId, isFavourites, partialItems, debugLog)
@@ -257,6 +248,9 @@ object GalleryCache {
                     isFavourites,
                     GalleryCacheData(schemaVersion = 2, complete = false, items = partialItems, nextOffset = offset),
                 )
+                if (partialItems.isNotEmpty()) {
+                    return@withLock ChapterLedger.recordChapters(user, folderId, isFavourites, partialItems, debugLog)
+                }
                 throw e
             }
         }

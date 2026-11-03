@@ -190,4 +190,55 @@ class DescriptionAndGalleryTest {
         assertEquals("https://images-wixmp.com/f/abc/xyz.jpg", parsed?.baseUri)
         assertEquals("nested_sample", parsed?.prettyName)
     }
+
+    @Test
+    fun testExtractInitialStateWithEmbeddedScriptsAndEscapedQuotes() {
+        val api = DeviantArtApi(okhttp3.OkHttpClient())
+        val html = """
+            <html>
+            <head><title>Test</title></head>
+            <body>
+            <script>
+            window.__INITIAL_STATE__ = JSON.parse("{\"@@entities\":{\"deviation\":{\"123\":{\"title\":\"Test Art\",\"media\":{\"baseUri\":\"https:\/\/images-wixmp.com\/f\/art.jpg\",\"types\":[{\"t\":\"fullview\",\"c\":\"\/v1\/fill\/art.jpg\"}]}}},\"subScript\":\"createElement(\\\"script\\\");s.src=foo;\",\"quote\":\"blackmail for the new \'girl\'...\"}}");
+            window.__URL_CONFIG__ = JSON.parse("{}");
+            </script>
+            </body>
+            </html>
+        """.trimIndent()
+
+        val root = api.extractInitialStateJson(html)
+        org.junit.Assert.assertNotNull(root)
+        val dev = root?.get("@@entities")?.let { it as? kotlinx.serialization.json.JsonObject }
+            ?.get("deviation")?.let { it as? kotlinx.serialization.json.JsonObject }
+            ?.get("123")?.let { it as? kotlinx.serialization.json.JsonObject }
+        org.junit.Assert.assertNotNull(dev)
+        assertEquals("Test Art", dev?.get("title")?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.content })
+
+        val (primary, _) = api.extractDeviationMediaFromHtml(html, "123")
+        org.junit.Assert.assertNotNull(primary)
+        assertEquals("https://images-wixmp.com/f/art.jpg", primary?.baseUri)
+    }
+
+    @Test
+    fun testTipTapParsingWithFormattingAndLinks() {
+        val tiptapJson = """
+            {
+              "type": "doc",
+              "content": [
+                {
+                  "type": "paragraph",
+                  "content": [
+                    {"type": "text", "text": "Hello "},
+                    {"type": "text", "marks": [{"type": "bold"}], "text": "World"},
+                    {"type": "text", "text": "! Visit "},
+                    {"type": "text", "marks": [{"type": "link", "attrs": {"href": "https://deviantart.com"}}], "text": "DeviantArt"}
+                  ]
+                }
+              ]
+            }
+        """.trimIndent()
+        val cleaned = cleanDescriptionHtml(tiptapJson)
+        assertTrue(cleaned.contains("<b>World</b>"))
+        assertTrue(cleaned.contains("<font color=\"#0570e6\"><u>DeviantArt</u></font>"))
+    }
 }
