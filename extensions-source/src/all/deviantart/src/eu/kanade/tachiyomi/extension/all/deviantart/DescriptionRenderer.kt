@@ -9,7 +9,6 @@ import android.text.Layout
 import android.text.StaticLayout
 import android.text.TextPaint
 import java.io.ByteArrayOutputStream
-import kotlin.math.min
 
 object DescriptionRenderer {
 
@@ -241,4 +240,3 @@ object DescriptionRenderer {
         return out.toByteArray()
     }
 }
-

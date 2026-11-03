@@ -36,10 +36,9 @@ abstract class DeviantArt :
     private val preferences: SharedPreferences by getPreferencesLazy()
 
     private val api by lazy { DeviantArtApi(client, preferences.debugLog) }
-    private val feeds by lazy { Feeds(client, baseUrl) }
+    private val feeds by lazy { Feeds(client, baseUrl, api) }
 
-    override fun OkHttpClient.Builder.configureClient(): OkHttpClient.Builder =
-        addInterceptor(DescriptionInterceptor { devId -> api.fetchArtworkDescriptionById(devId) })
+    override fun OkHttpClient.Builder.configureClient(): OkHttpClient.Builder = addInterceptor(DescriptionInterceptor { devId -> api.fetchArtworkDescriptionById(devId) })
         .rateLimit(permits = 2, period = 1.seconds) { it.host == "backend.deviantart.com" }
         .rateLimit(permits = 2, period = 1.seconds) { it.host == "www.deviantart.com" }
         .rateLimit(permits = 10, period = 1.seconds) { it.host.endsWith("wixmp.com") }

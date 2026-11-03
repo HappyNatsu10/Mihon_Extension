@@ -17,9 +17,7 @@ data class ArtworkDescription(
 object DescriptionStore {
     private val cache = Collections.synchronizedMap(
         object : LinkedHashMap<String, ArtworkDescription>(50, 0.75f, true) {
-            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, ArtworkDescription>?): Boolean {
-                return size > 50
-            }
+            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, ArtworkDescription>?): Boolean = size > 50
         },
     )
 
@@ -84,4 +82,3 @@ fun computeDescriptionHash(text: String, title: String, author: String, version:
     val digest = MessageDigest.getInstance("SHA-256").digest(input.toByteArray(Charsets.UTF_8))
     return digest.take(4).joinToString("") { "%02x".format(it) }
 }
-

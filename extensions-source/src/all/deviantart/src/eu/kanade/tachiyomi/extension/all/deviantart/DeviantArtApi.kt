@@ -1,6 +1,5 @@
 package eu.kanade.tachiyomi.extension.all.deviantart
 
-import android.util.Log
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
@@ -428,17 +427,17 @@ class DeviantArtApi(
         return RssPageResult(items, next?.let { "$WEB_BASE_URL/?offset=$it" }, hasMore)
     }
 
-    private val QUALITY_REGEX = Regex(",q_\\d+")
+    private val qualityRegex = Regex(",q_\\d+")
 
     /** Full-view URL exactly as DeviantArt composes it; only the quality value is raised. Never edit w_/h_. */
     fun fullviewUrl(m: Media, raiseQuality: Boolean = true): String? {
         val base = m.baseUri ?: return null
-        val fv = m.types.firstOrNull { it.t == "fullview" }
-            ?: m.types.firstOrNull { it.t == "preview" }
-            ?: m.types.firstOrNull()
+        val fv = m.types.firstOrNull { it.t == "fullview" && !it.c.isNullOrBlank() }
+            ?: m.types.firstOrNull { it.t == "preview" && !it.c.isNullOrBlank() }
+            ?: m.types.firstOrNull { !it.c.isNullOrBlank() }
         val path = fv?.c?.replace("<prettyName>", m.prettyName.orEmpty())
         var url = if (path != null) base + path else base
-        if (raiseQuality) url = QUALITY_REGEX.replace(url, ",q_100")
+        if (raiseQuality) url = qualityRegex.replace(url, ",q_100")
         val token = m.token.firstOrNull()
         return if (token != null) "$url?token=$token" else url
     }
@@ -475,7 +474,11 @@ class DeviantArtApi(
     }
 
     fun fetchAdditionalMedia(devId: String): List<Media> {
-        val csrf = try { csrfToken() } catch (_: Exception) { return emptyList() }
+        val csrf = try {
+            csrfToken()
+        } catch (_: Exception) {
+            return emptyList()
+        }
         val url = "$WEB_BASE_URL/_puppy/dadeviation/media".toHttpUrl().newBuilder()
             .addQueryParameter("deviationid", devId)
             .addQueryParameter("csrf_token", csrf)
