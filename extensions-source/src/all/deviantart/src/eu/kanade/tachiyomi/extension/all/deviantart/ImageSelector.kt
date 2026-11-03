@@ -122,8 +122,8 @@ object ImageSelector {
                     val rawPayload = segments[1]
                     val padded = rawPayload + "=".repeat((4 - rawPayload.length % 4) % 4)
                     val decoded = String(java.util.Base64.getUrlDecoder().decode(padded))
-                    val widthMatch = Regex(""""width"\s*:\s*"<=?(\d+)"""").find(decoded)
-                    val heightMatch = Regex(""""height"\s*:\s*"<=?(\d+)"""").find(decoded)
+                    val widthMatch = Regex(""""width"\s*:\s*"?<=?(\d+)""").find(decoded)
+                    val heightMatch = Regex(""""height"\s*:\s*"?<=?(\d+)""").find(decoded)
                     val maxW = widthMatch?.groupValues?.get(1)?.toIntOrNull()
                     val maxH = heightMatch?.groupValues?.get(1)?.toIntOrNull()
 

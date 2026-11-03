@@ -104,6 +104,48 @@ class DescriptionAndGalleryTest {
     }
 
     @Test
+    fun testFullviewUrlPicksDownloadTokenForLosslessOriginal() {
+        val api = DeviantArtApi(okhttp3.OkHttpClient())
+        // base64 for {"aud":["urn:service:file.download"]}
+        val dlPayload = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString("""{"aud":["urn:service:file.download"]}""".toByteArray())
+        val dlToken = "header.$dlPayload.sig"
+        val opPayload = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString("""{"aud":["urn:service:image.operations"],"width":"<=1216"}""".toByteArray())
+        val opToken = "header.$opPayload.sig"
+
+        val media = Media(
+            baseUri = "https://images-wixmp.com/f/abc/xyz.png",
+            prettyName = "sample",
+            token = listOf(opToken, dlToken),
+            types = listOf(
+                MediaType(t = "150", c = "/v1/fit/w_150,h_150/sample-150.jpg", w = 150, h = 150),
+            ),
+        )
+
+        // With raiseQuality = true, should pick the file.download token and return direct baseUri without /v1/ thumbnail downscale
+        val url = api.fullviewUrl(media, raiseQuality = true)
+        assertEquals("https://images-wixmp.com/f/abc/xyz.png?token=$dlToken", url)
+    }
+
+    @Test
+    fun testFullviewUrlPicksLargestTypeWhenFullviewMissing() {
+        val api = DeviantArtApi(okhttp3.OkHttpClient())
+        val media = Media(
+            baseUri = "https://images-wixmp.com/f/abc/xyz.png",
+            prettyName = "sample",
+            token = listOf("tok"),
+            types = listOf(
+                MediaType(t = "150", c = "/v1/fit/w_150,h_150/sample-150.jpg", w = 150, h = 150),
+                MediaType(t = "375W", c = "/v1/fit/w_375,h_548/sample-375w.jpg", w = 375, h = 548),
+                MediaType(t = "1216W", c = "/v1/fit/w_1216,h_832/sample-1216w.jpg", w = 1216, h = 832),
+            ),
+        )
+
+        val url = api.fullviewUrl(media, raiseQuality = true)
+        // Must NOT pick 150! Must pick the largest resolution (1216W)
+        assertTrue(url != null && url.contains("w_1216,h_832"))
+    }
+
+    @Test
     fun testMergeWithExisting() {
         // (a) Existing 500 chapters and crawl of 60 returns >= 500
         val existing = (1..500).map { i ->

@@ -177,6 +177,18 @@ class DeviantArtApi(
         val description = extractDescription(document, totalDeviations, folderName, ref.isFavourites)
         val canonicalName = extractCanonicalUsername(document, ref.user)
 
+        val galleryCoverFromLatest = run {
+            try {
+                val firstPage = fetchGalleryJson(ref.user, ref.folderId, ref.isFavourites, offset = 0, limit = 1, hidePaywalled = false)
+                firstPage.items.firstOrNull()?.let { firstItem ->
+                    val images = fetchDeviationImages(firstItem.path, QualityMode.BEST_AVAILABLE)
+                    images.firstOrNull()?.let { ImageSelector.maximizeRendition(it) }
+                }
+            } catch (_: Exception) {
+                null
+            }
+        }
+
         val ogImage = document.selectFirst("meta[property=og:image]")?.attr("content")
         val coverCandidate = if (!ogImage.isNullOrBlank() && isArtworkUrl(ogImage)) {
             ImageSelector.maximizeRendition(ogImage)
@@ -184,17 +196,7 @@ class DeviantArtApi(
             null
         }
 
-        val coverUrl = coverCandidate ?: run {
-            try {
-                val firstPage = fetchGalleryJson(ref.user, ref.folderId, ref.isFavourites, offset = 0, limit = 1)
-                firstPage.items.firstOrNull()?.let { firstItem ->
-                    val images = fetchDeviationImages(firstItem.path, QualityMode.STANDARD)
-                    images.firstOrNull()?.let { ImageSelector.maximizeRendition(it) }
-                }
-            } catch (_: Exception) {
-                null
-            }
-        }
+        val coverUrl = galleryCoverFromLatest ?: coverCandidate ?: avatarUrl
 
         val profile = ArtistProfile(
             username = canonicalName,
@@ -507,17 +509,54 @@ class DeviantArtApi(
 
     private val qualityRegex = Regex(",q_\\d+")
 
-    /** Full-view URL exactly as DeviantArt composes it; only the quality value is raised. Never edit w_/h_. */
+    private fun findDownloadToken(tokens: List<String>): String? {
+        for (tok in tokens) {
+            val segments = tok.split('.')
+            if (segments.size >= 2) {
+                try {
+                    val rawPayload = segments[1]
+                    val padded = rawPayload + "=".repeat((4 - rawPayload.length % 4) % 4)
+                    val decoded = String(java.util.Base64.getUrlDecoder().decode(padded))
+                    if (decoded.contains("file.download")) {
+                        return tok
+                    }
+                } catch (_: Exception) {}
+            }
+        }
+        return null
+    }
+
+    /**
+     * Resolves the highest quality image URL for the given Media object.
+     * When raiseQuality is true (BEST_AVAILABLE):
+     * 1. Uses the direct uncompressed original download file if a file.download token is present.
+     * 2. Otherwise selects the largest available rendition from types (avoiding crops and tiny thumbnails).
+     * 3. Maximizes rendition dimensions within the token's allowed constraints (ImageSelector.maximizeRendition).
+     */
     fun fullviewUrl(m: Media, raiseQuality: Boolean = true): String? {
         val base = m.baseUri ?: return null
-        val fv = m.types.firstOrNull { it.t == "fullview" && !it.c.isNullOrBlank() }
-            ?: m.types.firstOrNull { it.t == "preview" && !it.c.isNullOrBlank() }
+
+        if (raiseQuality && m.token.isNotEmpty()) {
+            val dlToken = findDownloadToken(m.token)
+            if (dlToken != null) {
+                return "$base?token=$dlToken"
+            }
+        }
+
+        val nonCrops = m.types.filter { !it.c.isNullOrBlank() && it.c?.contains("/v1/crop/") != true }
+        val fv = nonCrops.firstOrNull { it.t == "fullview" }
+            ?: nonCrops.maxByOrNull { (it.w ?: 0) * (it.h ?: 0) }
+            ?: nonCrops.firstOrNull { it.t == "preview" }
+            ?: m.types.maxByOrNull { (it.w ?: 0) * (it.h ?: 0) }
             ?: m.types.firstOrNull { !it.c.isNullOrBlank() }
+
         val path = fv?.c?.replace("<prettyName>", m.prettyName.orEmpty())
         var url = if (path != null) base + path else base
         if (raiseQuality) url = qualityRegex.replace(url, ",q_100")
         val token = m.token.firstOrNull()
-        return if (token != null) "$url?token=$token" else url
+        if (token != null) url = "$url?token=$token"
+
+        return if (raiseQuality) ImageSelector.maximizeRendition(url) else url
     }
 
     /** Original file; only for isDownloadable artworks, usually needs login cookies. */
@@ -529,10 +568,21 @@ class DeviantArtApi(
         } catch (_: Exception) {
             return null
         }
+
+        val devId = DEVIATION_ID_REGEX.find(artworkUrl)?.groupValues?.get(1)
+            ?: artworkUrl.substringAfterLast("-").substringAfterLast("/")
+        val root = extractInitialStateJson(pageHtml)
+        val devObj = root?.get("@@entities")?.jsonObject?.get("deviation")?.jsonObject?.get(devId)?.jsonObject
+        val dlUrlFromJson = devObj?.get("download")?.jsonObject?.get("url")?.jsonPrimitive?.contentOrNull
+        if (!dlUrlFromJson.isNullOrBlank()) {
+            return dlUrlFromJson
+        }
+
+        val unescaped = pageHtml.replace("\\/", "/").replace("\\u002F", "/")
         val marker = "https://www.deviantart.com/download/"
-        val start = pageHtml.indexOf(marker).takeIf { it >= 0 } ?: return null
-        val end = pageHtml.indexOf('"', start).takeIf { it > start } ?: return null
-        return Parser.unescapeEntities(pageHtml.substring(start, end), false)
+        val start = unescaped.indexOf(marker).takeIf { it >= 0 } ?: return null
+        val end = unescaped.indexOf('"', start).takeIf { it > start } ?: return null
+        return Parser.unescapeEntities(unescaped.substring(start, end), false)
     }
 
     fun parseMedia(element: JsonElement?): Media? {
@@ -1025,7 +1075,8 @@ class DeviantArtApi(
         val isDownloadable = doc.selectFirst("a[data-hook=download_button]") != null ||
             doc.selectFirst("a[aria-label=Download]") != null ||
             doc.selectFirst("a[data-hook=action_download]") != null ||
-            html.contains("\"isDownloadable\":true")
+            html.contains("\"isDownloadable\":true") ||
+            html.contains("\"download\":")
 
         val origUrl = if (isDownloadable && qualityMode == QualityMode.BEST_AVAILABLE) {
             originalUrl(fullUrl, html)
