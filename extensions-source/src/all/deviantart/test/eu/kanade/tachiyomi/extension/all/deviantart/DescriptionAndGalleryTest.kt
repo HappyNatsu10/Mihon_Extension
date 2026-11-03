@@ -241,4 +241,22 @@ class DescriptionAndGalleryTest {
         assertTrue(cleaned.contains("<b>World</b>"))
         assertTrue(cleaned.contains("<font color=\"#0570e6\"><u>DeviantArt</u></font>"))
     }
+
+    @Test
+    fun testMergeWithExistingPaywalledIndicatorAndScanlator() {
+        val crawled = listOf(
+            CachedItem(id = "1", title = "Free Artwork", path = "/art/free-1", publishedMs = 1000L, isPaywalled = false),
+            CachedItem(id = "2", title = "Paid Artwork", path = "/art/paid-2", publishedMs = 2000L, isPaywalled = true),
+        )
+        val chapters = mergeWithExisting(crawled, emptyList(), sortById = false) { TestChapter() }
+        assertEquals(2, chapters.size)
+
+        val freeChap = chapters.first { it.url == "/art/free-1" }
+        assertEquals("Free Artwork", freeChap.name)
+        assertEquals(null, freeChap.scanlator)
+
+        val paidChap = chapters.first { it.url == "/art/paid-2" }
+        assertEquals("🔒 Paid Artwork", paidChap.name)
+        assertEquals("Paywalled", paidChap.scanlator)
+    }
 }

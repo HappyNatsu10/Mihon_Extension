@@ -103,6 +103,7 @@ object ChapterLedger {
                     path = item.path,
                     title = item.title,
                     publishedMs = item.publishedMs,
+                    isPaywalled = item.isPaywalled,
                 )
                 reconciledList.add(item)
             }
@@ -119,6 +120,7 @@ object ChapterLedger {
                         title = entry.title,
                         path = entry.path,
                         publishedMs = entry.publishedMs,
+                        isPaywalled = entry.isPaywalled,
                     ),
                 )
             }

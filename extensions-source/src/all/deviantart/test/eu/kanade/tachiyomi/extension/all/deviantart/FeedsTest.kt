@@ -239,4 +239,48 @@ class FeedsTest {
         assertEquals("/isubmit/art/2026---332-1392028917", first.url)
         assertNotNull(first.thumbnail_url)
     }
+
+    @Test
+    fun testPaywalledDeviationFeedHandling() {
+        val paywalledJson = """
+            {
+              "deviations": [
+                {
+                  "deviationId": 99999,
+                  "title": "Exclusive Tier Artwork",
+                  "url": "https://www.deviantart.com/artist/art/exclusive-99999",
+                  "isLocked": true,
+                  "author": { "username": "artist" }
+                },
+                {
+                  "deviationId": 88888,
+                  "title": "Free Art",
+                  "url": "https://www.deviantart.com/artist/art/free-88888",
+                  "isLocked": false,
+                  "author": { "username": "artist" }
+                }
+              ]
+            }
+        """.trimIndent()
+
+        val client = OkHttpClient()
+        val api = DeviantArtApi(client)
+        val feeds = Feeds(client, "https://www.deviantart.com", api, mangaFactory = { TestSManga() })
+
+        // When hidePaywalled = false: both show, locked has 🔒 and genre = "Artwork, Paywalled"
+        val (allMangas, _) = feeds.parseNetworkbarJsonWithCursor(paywalledJson, hidePaywalled = false)
+        assertEquals(2, allMangas.size)
+        val locked = allMangas.first { it.url.contains("exclusive") }
+        assertEquals("🔒 Exclusive Tier Artwork", locked.title)
+        assertEquals("Artwork, Paywalled", locked.genre)
+
+        val free = allMangas.first { it.url.contains("free") }
+        assertEquals("Free Art", free.title)
+        assertEquals("Artwork", free.genre)
+
+        // When hidePaywalled = true: locked is excluded
+        val (filteredMangas, _) = feeds.parseNetworkbarJsonWithCursor(paywalledJson, hidePaywalled = true)
+        assertEquals(1, filteredMangas.size)
+        assertEquals("Free Art", filteredMangas[0].title)
+    }
 }

@@ -112,7 +112,8 @@ class DeviantArtApi(
             val response = HttpGuard.executeWithRetry("artwork metadata", debugLog) {
                 client.newCall(Request.Builder().url(fullUrl).build()).execute()
             }
-            val doc = Jsoup.parse(response.body.string(), fullUrl)
+            val html = response.body.string()
+            val doc = Jsoup.parse(html, fullUrl)
             val title = doc.selectFirst("meta[property=og:title]")?.attr("content")?.substringBefore(" by ")?.trim()
                 ?: defaultTitle
             val author = doc.selectFirst("meta[property=og:title]")?.attr("content")?.substringAfter(" by ")?.substringBefore(" on DeviantArt")?.trim()
@@ -122,11 +123,17 @@ class DeviantArtApi(
             val thumb = doc.selectFirst("img[fetchpriority=high]")?.absUrl("src")?.takeIf { isArtworkUrl(it) }
                 ?: doc.selectFirst("meta[property=og:image]")?.attr("content")?.takeIf { isArtworkUrl(it) }
 
+            val root = extractInitialStateJson(html)
+            val devId = trailingIdRegex.find(path)?.groupValues?.get(1) ?: path.substringAfterLast("-").substringAfterLast("/")
+            val devObj = root?.get("@@entities")?.jsonObject?.get("deviation")?.jsonObject?.get(devId)?.jsonObject
+            val paywalled = devObj?.let { isPaywalled(it) } ?: (html.contains("\"isLocked\":true") || html.contains("\"isPaidContent\":true"))
+
             ArtworkDetails(
                 title = title,
                 author = author,
                 description = desc,
                 thumbnailUrl = thumb,
+                isPaywalled = paywalled,
             )
         } catch (_: Exception) {
             ArtworkDetails(
@@ -134,6 +141,7 @@ class DeviantArtApi(
                 author = defaultAuthor,
                 description = null,
                 thumbnailUrl = null,
+                isPaywalled = false,
             )
         }
     }
@@ -451,11 +459,13 @@ class DeviantArtApi(
             } else {
                 0L
             }
+            val paywalled = isPaywalled(dev)
             CachedItem(
                 id = id.toString(),
                 title = dev["title"]?.jsonPrimitive?.contentOrNull ?: "Untitled",
                 path = link.removePrefix(WEB_BASE_URL),
                 publishedMs = publishedMs,
+                isPaywalled = paywalled,
             )
         }
         val next = root["nextOffset"]?.jsonPrimitive?.intOrNull

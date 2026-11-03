@@ -223,10 +223,13 @@ class Feeds(
         for (el in deviationsArray) {
             val obj = el.jsonObject
             val dev = (obj["deviation"] as? JsonObject) ?: obj
-            if (hidePaywalled && api.isPaywalled(dev)) continue
+            val isPaywalled = api.isPaywalled(dev)
+            if (hidePaywalled && isPaywalled) continue
             val devId = dev["deviationId"]?.jsonPrimitive?.longOrNull ?: continue
             val url = dev["url"]?.jsonPrimitive?.contentOrNull ?: continue
-            val title = dev["title"]?.jsonPrimitive?.contentOrNull?.ifBlank { "Artwork" } ?: "Artwork"
+            val rawTitle = dev["title"]?.jsonPrimitive?.contentOrNull?.ifBlank { "Artwork" } ?: "Artwork"
+            val cleanTitle = rawTitle.removePrefix("🔒 ")
+            val title = if (isPaywalled) "🔒 $cleanTitle" else cleanTitle
 
             val authorObj = dev["author"] as? JsonObject
             val author = authorObj?.get("username")?.jsonPrimitive?.contentOrNull
@@ -250,7 +253,7 @@ class Feeds(
                     this.artist = author
                     this.thumbnail_url = cover
                     this.status = SManga.COMPLETED
-                    this.genre = "Artwork"
+                    this.genre = if (isPaywalled) "Artwork, Paywalled" else "Artwork"
                 },
             )
         }
@@ -288,9 +291,12 @@ class Feeds(
         val mangas = mutableListOf<SManga>()
         for (id in devIds) {
             val dev = devMap[id.toString()]?.jsonObject ?: continue
-            if (hidePaywalled && api.isPaywalled(dev)) continue
+            val isPaywalled = api.isPaywalled(dev)
+            if (hidePaywalled && isPaywalled) continue
             val url = dev["url"]?.jsonPrimitive?.contentOrNull ?: continue
-            val title = dev["title"]?.jsonPrimitive?.contentOrNull?.ifBlank { "Artwork" } ?: "Artwork"
+            val rawTitle = dev["title"]?.jsonPrimitive?.contentOrNull?.ifBlank { "Artwork" } ?: "Artwork"
+            val cleanTitle = rawTitle.removePrefix("🔒 ")
+            val title = if (isPaywalled) "🔒 $cleanTitle" else cleanTitle
             val authorId = dev["author"]?.jsonPrimitive?.contentOrNull
             val author = authorId?.let { userMap?.get(it)?.jsonObject?.get("username")?.jsonPrimitive?.contentOrNull }
                 ?: url.removePrefix("https://www.deviantart.com/").removePrefix("http://www.deviantart.com/").removePrefix("/").substringBefore("/art/").substringBefore("/")
@@ -311,7 +317,7 @@ class Feeds(
                     this.artist = author
                     this.thumbnail_url = cover
                     this.status = SManga.COMPLETED
-                    this.genre = "Artwork"
+                    this.genre = if (isPaywalled) "Artwork, Paywalled" else "Artwork"
                 },
             )
         }

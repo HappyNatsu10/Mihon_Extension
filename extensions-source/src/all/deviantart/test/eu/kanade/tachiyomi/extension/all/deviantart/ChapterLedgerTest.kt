@@ -85,4 +85,21 @@ class ChapterLedgerTest {
         val badFile = File(tempDir, "${ledgerFile.name}.bad")
         assertTrue(badFile.exists())
     }
+
+    @Test
+    fun testPreservesIsPaywalled() {
+        val items = listOf(
+            CachedItem("301", "Locked", "/artist/art/locked-301", 1000L, isPaywalled = true),
+            CachedItem("302", "Free", "/artist/art/free-302", 2000L, isPaywalled = false),
+        )
+        val recorded = ChapterLedger.recordChapters("artist", "folder2", items)
+        assertEquals(2, recorded.size)
+        assertTrue(recorded.first { it.id == "301" }.isPaywalled)
+        org.junit.Assert.assertFalse(recorded.first { it.id == "302" }.isPaywalled)
+
+        // Re-load from disk to ensure serialization persisted the field
+        val ledger = ChapterLedger.loadLedger("artist", "folder2")
+        assertTrue(ledger.entries["301"]?.isPaywalled == true)
+        org.junit.Assert.assertFalse(ledger.entries["302"]?.isPaywalled == true)
+    }
 }

@@ -235,25 +235,28 @@ abstract class DeviantArt :
 
             if (fetchDetails) {
                 val details = api.fetchArtworkDetails(manga.url)
+                val cleanTitle = details.title.ifBlank { manga.title }.removePrefix("🔒 ")
                 updatedManga = manga.apply {
-                    title = details.title.ifBlank { manga.title }
+                    title = if (details.isPaywalled) "🔒 $cleanTitle" else cleanTitle
                     author = details.author.ifBlank { manga.author }
                     artist = details.author.ifBlank { manga.artist }
                     description = details.description
                     thumbnail_url = details.thumbnailUrl ?: manga.thumbnail_url
                     status = SManga.COMPLETED
-                    genre = "Artwork"
+                    genre = if (details.isPaywalled) "Artwork, Paywalled" else "Artwork"
                     initialized = true
                 }
             }
 
             if (fetchChapters) {
+                val isPaywalled = updatedManga.genre?.contains("Paywalled") == true || updatedManga.title.startsWith("🔒 ")
                 updatedChapters = listOf(
                     SChapter.create().apply {
                         url = manga.url
                         name = updatedManga.title.ifBlank { "Artwork" }
                         chapter_number = 1f
                         date_upload = 0L
+                        scanlator = if (isPaywalled) "Paywalled" else null
                     },
                 )
             }
@@ -320,7 +323,7 @@ abstract class DeviantArt :
                         api.fetchRssPageResult(ref.user, ref.folderId, ref.isFavourites, offset)
                     } else {
                         try {
-                            api.fetchGalleryJson(ref.user, ref.folderId, ref.isFavourites, offset, limit = 60, hidePaywalled = preferences.hidePaywalled)
+                            api.fetchGalleryJson(ref.user, ref.folderId, ref.isFavourites, offset, limit = 60, hidePaywalled = false)
                         } catch (e: Exception) {
                             useRss = true
                             api.fetchRssPageResult(ref.user, ref.folderId, ref.isFavourites, offset)
@@ -576,20 +579,24 @@ internal fun mergeWithExisting(
     for (item in crawled) {
         val key = chapterKey(item.path)
         crawledOrder.add(key)
+        val cleanTitle = item.title.removePrefix("🔒 ")
         byKey[key] = chapterFactory().apply {
             url = item.path
-            name = item.title
+            name = if (item.isPaywalled) "🔒 $cleanTitle" else cleanTitle
             date_upload = item.publishedMs
+            scanlator = if (item.isPaywalled) "Paywalled" else null
         }
     }
     for (old in existing) {
         if (old.url.contains("batch=")) continue // chapters from the optional batch mode
         val key = chapterKey(old.url)
+        val fresh = byKey[key]
         // keep the STORED url so Mihon keeps matching the same chapter (and its read state)
         byKey[key] = chapterFactory().apply {
             url = old.url
-            name = byKey[key]?.name ?: old.name
-            date_upload = byKey[key]?.date_upload?.takeIf { it > 0L } ?: old.date_upload
+            name = fresh?.name ?: old.name
+            date_upload = fresh?.date_upload?.takeIf { it > 0L } ?: old.date_upload
+            scanlator = if (fresh != null) fresh.scanlator else old.scanlator
         }
     }
 

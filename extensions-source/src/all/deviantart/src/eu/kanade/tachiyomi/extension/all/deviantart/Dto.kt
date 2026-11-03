@@ -16,6 +16,7 @@ data class ArtworkDetails(
     val author: String,
     val description: String? = null,
     val thumbnailUrl: String? = null,
+    val isPaywalled: Boolean = false,
 )
 
 data class ArtistProfile(
@@ -33,6 +34,7 @@ data class CachedItem(
     val title: String,
     val path: String,
     val publishedMs: Long,
+    val isPaywalled: Boolean = false,
 )
 
 @Serializable
@@ -48,6 +50,7 @@ data class LedgerEntry(
     val path: String,
     val title: String,
     val publishedMs: Long,
+    val isPaywalled: Boolean = false,
 )
 
 @Serializable
