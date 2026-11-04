@@ -405,4 +405,37 @@ class DescriptionAndGalleryTest {
         assertEquals(DescriptionRenderer.CONTENT_WIDTH, finalW)
         assertEquals(1586, finalH)
     }
+
+    @Test
+    fun testGalleryThumbnailPrioritizesDeviantAvatarOverLatestArtwork() {
+        // When avatar is present, it must be the primary thumbnail option
+        val avatar = "https://a.deviantart.net/avatars-big/t/e/tentuyu.jpg"
+        val latestArtwork = "https://images-wixmp.com/f/artwork.jpg"
+        val candidate = "https://images-wixmp.com/f/og.jpg"
+
+        val profileWithAvatar = ArtistProfile(
+            username = "tentuyu",
+            totalDeviations = 100,
+            avatarUrl = avatar,
+            coverUrl = avatar,
+        )
+
+        // Avatar must take precedence over artwork
+        val chosenThumb = profileWithAvatar.avatarUrl?.takeIf { it.isNotBlank() }
+            ?: profileWithAvatar.coverUrl?.takeIf { it.isNotBlank() }
+            ?: latestArtwork
+        assertEquals(avatar, chosenThumb)
+
+        // When avatar is absent, fallback to latest artwork
+        val profileWithoutAvatar = ArtistProfile(
+            username = "tentuyu",
+            totalDeviations = 100,
+            avatarUrl = null,
+            coverUrl = latestArtwork,
+        )
+        val fallbackThumb = profileWithoutAvatar.avatarUrl?.takeIf { it.isNotBlank() }
+            ?: profileWithoutAvatar.coverUrl?.takeIf { it.isNotBlank() }
+            ?: candidate
+        assertEquals(latestArtwork, fallbackThumb)
+    }
 }

@@ -81,7 +81,7 @@ class DeviantArtApi(
         val u = url.lowercase()
         if (u.contains("st.deviantart.net")) return false
         if (u.contains("touch-icon") || u.contains("favicon") || u.contains("da_logo") || u.contains("deviantart-logo")) return false
-        if (u.contains("default_avatar") || u.contains("placeholder") || u.contains("/avatars/")) return false
+        if (u.contains("default_avatar") || u.contains("placeholder") || u.contains("/avatars/") || u.contains("/avatars-big/")) return false
         if (u.contains("/download/")) return false
         return u.contains("wixmp.com") || (u.contains("deviantart.net") && !u.contains("st.deviantart.net"))
     }
@@ -100,6 +100,7 @@ class DeviantArtApi(
             val author = oembed.authorName?.takeIf { it.isNotBlank() } ?: defaultAuthor
             val title = oembed.title?.takeIf { it.isNotBlank() } ?: defaultTitle
             val thumb = (oembed.thumbnailUrl ?: oembed.url)?.takeIf { isArtworkUrl(it) }
+                ?: predictAvatarUrl(author)
             return ArtworkDetails(
                 title = title,
                 author = author,
@@ -122,6 +123,8 @@ class DeviantArtApi(
                 ?: doc.selectFirst(".legacy-journal")?.wholeText()
             val thumb = doc.selectFirst("img[fetchpriority=high]")?.absUrl("src")?.takeIf { isArtworkUrl(it) }
                 ?: doc.selectFirst("meta[property=og:image]")?.attr("content")?.takeIf { isArtworkUrl(it) }
+                ?: extractAvatarUrl(doc, html, author)
+                ?: predictAvatarUrl(author)
 
             val root = extractInitialStateJson(html)
             val devId = trailingIdRegex.find(path)?.groupValues?.get(1) ?: path.substringAfterLast("-").substringAfterLast("/")
@@ -149,7 +152,7 @@ class DeviantArtApi(
                 title = defaultTitle,
                 author = defaultAuthor,
                 description = null,
-                thumbnailUrl = null,
+                thumbnailUrl = predictAvatarUrl(defaultAuthor),
                 isPaywalled = false,
             )
         }
@@ -181,10 +184,10 @@ class DeviantArtApi(
         val document = Jsoup.parse(html, galleryUrl)
 
         val totalDeviations = extractTotalFromHtml(document)
-        val avatarUrl = extractAvatarUrl(document)
+        val canonicalName = extractCanonicalUsername(document, ref.user)
+        val avatarUrl = extractAvatarUrl(document, html, canonicalName) ?: predictAvatarUrl(canonicalName)
         val folderName = if (!ref.isAll) extractFolderName(document, ref.folderId!!) else null
         val description = extractDescription(document, totalDeviations, folderName, ref.isFavourites)
-        val canonicalName = extractCanonicalUsername(document, ref.user)
 
         val galleryCoverFromLatest = run {
             try {
@@ -205,7 +208,12 @@ class DeviantArtApi(
             null
         }
 
-        val coverUrl = galleryCoverFromLatest ?: coverCandidate ?: avatarUrl
+        // Deviant profile picture is the primary option (clear & high-quality),
+        // falling back to latest artwork cover, then cover candidate, then predicted avatar.
+        val coverUrl = avatarUrl.takeIf { it.isNotBlank() }
+            ?: galleryCoverFromLatest
+            ?: coverCandidate
+            ?: predictAvatarUrl(canonicalName)
 
         val profile = ArtistProfile(
             username = canonicalName,
@@ -252,9 +260,145 @@ class DeviantArtApi(
         return 0
     }
 
-    private fun extractAvatarUrl(document: Document): String? = document.selectFirst("meta[property=og:image]")?.attr("content")
-        ?.takeIf { it.isNotEmpty() }
-        ?: document.selectFirst("img[property=contentUrl]")?.absUrl("src")
+    fun upgradeAvatarQuality(url: String): String {
+        var u = url.trim()
+            .replace("\\u002F", "/")
+            .replace("\\/", "/")
+            .trim('"', '\'', '\\')
+        if (u.isEmpty()) return ""
+
+        // DeviantArt standard avatars: upgrade /avatars/ to /avatars-big/ (150x150+ sharp high-res)
+        if (u.contains("a.deviantart.net/avatars/") && !u.contains("a.deviantart.net/avatars-big/")) {
+            u = u.replace("a.deviantart.net/avatars/", "a.deviantart.net/avatars-big/")
+        }
+
+        // Wix CDN avatars: upgrade low-res /v1/fill/w_50,h_50 thumbnails to 400x400 q_100
+        if (u.contains("wixmp.com")) {
+            u = u.replace(Regex("""/fill/w_\d+,h_\d+"""), "/fill/w_400,h_400")
+                .replace(Regex("""/fit/w_\d+,h_\d+"""), "/fit/w_400,h_400")
+                .replace("q_75", "q_100")
+                .replace("q_80", "q_100")
+        }
+
+        return u
+    }
+
+    fun predictAvatarUrl(username: String): String {
+        val clean = username.trim().lowercase().removePrefix("@")
+        if (clean.isEmpty()) return ""
+        val c1 = clean[0]
+        val c2 = if (clean.length > 1) clean[1] else c1
+        return "https://a.deviantart.net/avatars-big/$c1/$c2/$clean.jpg"
+    }
+
+    fun extractAvatarUrl(document: Document, html: String = "", username: String? = null): String? {
+        val targetUser = username?.trim()?.lowercase()?.removePrefix("@")
+
+        // 1. From window.__INITIAL_STATE__ -> @@entities.user
+        if (html.isNotBlank()) {
+            val root = extractInitialStateJson(html)
+            val userMap = root?.get("@@entities")?.jsonObject?.get("user")?.jsonObject
+            if (userMap != null) {
+                if (!targetUser.isNullOrEmpty()) {
+                    for ((_, userElement) in userMap) {
+                        val userObj = userElement.jsonObject
+                        val uname = userObj["username"]?.jsonPrimitive?.contentOrNull
+                        if (uname.equals(targetUser, ignoreCase = true)) {
+                            val icon = userObj["usericon"]?.jsonPrimitive?.contentOrNull
+                                ?: userObj["userIcon"]?.jsonPrimitive?.contentOrNull
+                                ?: userObj["avatarUrl"]?.jsonPrimitive?.contentOrNull
+                                ?: userObj["avatar"]?.jsonPrimitive?.contentOrNull
+                            if (!icon.isNullOrBlank()) {
+                                return upgradeAvatarQuality(icon)
+                            }
+                        }
+                    }
+                }
+                // Fallback within userMap: take first custom usericon
+                for ((_, userElement) in userMap) {
+                    val userObj = userElement.jsonObject
+                    val icon = userObj["usericon"]?.jsonPrimitive?.contentOrNull
+                        ?: userObj["userIcon"]?.jsonPrimitive?.contentOrNull
+                    if (!icon.isNullOrBlank() && !icon.contains("default.gif")) {
+                        return upgradeAvatarQuality(icon)
+                    }
+                }
+            }
+        }
+
+        // 2. From HTML DOM (Jsoup)
+        // Check <a data-username="..." data-icon="...">
+        if (!targetUser.isNullOrEmpty()) {
+            val userLink = document.select("a[data-icon]").firstOrNull {
+                it.attr("data-username").equals(targetUser, ignoreCase = true)
+            }
+            userLink?.attr("data-icon")?.takeIf { it.isNotBlank() }?.let {
+                return upgradeAvatarQuality(it)
+            }
+        }
+        document.selectFirst("a[data-icon]")?.attr("data-icon")?.takeIf { it.isNotBlank() }?.let {
+            return upgradeAvatarQuality(it)
+        }
+
+        // Check <img alt="<username>'s avatar"> or <img data-hook="user_avatar">
+        if (!targetUser.isNullOrEmpty()) {
+            val avatarImg = document.select("img[alt*=\"'s avatar\"]").firstOrNull {
+                it.attr("alt").contains(targetUser, ignoreCase = true)
+            }
+            avatarImg?.absUrl("src")?.takeIf { it.isNotBlank() }?.let {
+                return upgradeAvatarQuality(it)
+            }
+        }
+        document.selectFirst("img[data-hook=user_avatar]")?.absUrl("src")?.takeIf { it.isNotBlank() }?.let {
+            return upgradeAvatarQuality(it)
+        }
+        document.selectFirst("img.avatar")?.absUrl("src")?.takeIf { it.isNotBlank() }?.let {
+            return upgradeAvatarQuality(it)
+        }
+
+        // Check any img with src containing deviantart.net/avatars
+        if (!targetUser.isNullOrEmpty()) {
+            val matchedImg = document.select("img[src*=\"deviantart.net/avatars\"]").firstOrNull {
+                it.attr("src").contains(targetUser, ignoreCase = true)
+            }
+            matchedImg?.absUrl("src")?.takeIf { it.isNotBlank() }?.let {
+                return upgradeAvatarQuality(it)
+            }
+        }
+        document.selectFirst("img[src*=\"deviantart.net/avatars\"]")?.absUrl("src")?.takeIf { it.isNotBlank() }?.let {
+            return upgradeAvatarQuality(it)
+        }
+
+        // 3. From raw HTML regex
+        if (html.isNotBlank() && !targetUser.isNullOrEmpty()) {
+            val userRegex = Regex(
+                """https:[\\/]+a\.deviantart\.net[\\/]avatars(?:-big)?[\\/][^"'\s<>\\]*(?i:${Regex.escape(targetUser)})[^"'\s<>\\]*""",
+            )
+            userRegex.find(html)?.value?.let {
+                return upgradeAvatarQuality(it)
+            }
+
+            // Also search for "usericon":"..." near username
+            val userIconRegex = Regex(
+                """(?:username["\']?\s*:\s*["\']${Regex.escape(targetUser)}["\'].{0,250}usericon["\']?\s*:\s*["\']([^"\'\\]+)["\']|usericon["\']?\s*:\s*["\']([^"\'\\]+)["\'].{0,250}username["\']?\s*:\s*["\']${Regex.escape(targetUser)}["\'])""",
+                RegexOption.IGNORE_CASE,
+            )
+            userIconRegex.find(html)?.let { match ->
+                val raw = match.groupValues[1].ifBlank { match.groupValues[2] }
+                if (raw.isNotBlank()) return upgradeAvatarQuality(raw)
+            }
+        }
+
+        // 4. Any avatars-big URL in HTML
+        if (html.isNotBlank()) {
+            val anyAvatarBig = Regex("""https:[\\/]+a\.deviantart\.net[\\/]avatars-big[\\/][^\s"\'<>\\]+""").find(html)?.value
+            if (!anyAvatarBig.isNullOrBlank() && !anyAvatarBig.contains("default.gif")) {
+                return upgradeAvatarQuality(anyAvatarBig)
+            }
+        }
+
+        return null
+    }
 
     private fun extractFolderName(document: Document, fallbackId: String): String {
         val gallery = document.selectFirst("#content")

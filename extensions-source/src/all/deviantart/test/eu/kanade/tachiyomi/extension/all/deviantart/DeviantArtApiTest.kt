@@ -92,6 +92,75 @@ class DeviantArtApiTest {
         org.junit.Assert.assertFalse(api.isArtworkUrl("https://st.deviantart.net/emoticons/smile.gif"))
         org.junit.Assert.assertFalse(api.isArtworkUrl("https://www.deviantart.com/download/12345/test.zip"))
         org.junit.Assert.assertFalse(api.isArtworkUrl("https://a.deviantart.net/avatars/u/s/user.jpg"))
+        org.junit.Assert.assertFalse(api.isArtworkUrl("https://a.deviantart.net/avatars-big/u/s/user.jpg"))
+    }
+
+    @Test
+    fun testUpgradeAvatarQuality() {
+        val api = DeviantArtApi(OkHttpClient())
+        // Standard DeviantArt small avatar upgraded to avatars-big
+        val small = "https://a.deviantart.net/avatars/b/e/beanat.jpg?12"
+        assertEquals("https://a.deviantart.net/avatars-big/b/e/beanat.jpg?12", api.upgradeAvatarQuality(small))
+
+        // Already avatars-big preserved
+        val big = "https://a.deviantart.net/avatars-big/t/e/tentuyu.jpg"
+        assertEquals("https://a.deviantart.net/avatars-big/t/e/tentuyu.jpg", api.upgradeAvatarQuality(big))
+
+        // Unescaped unicode slashes
+        val escaped = "https:\\u002F\\u002Fa.deviantart.net\\u002Favatars\\u002Fp\\u002Fi\\u002Fpiranhawt.jpg?2"
+        assertEquals("https://a.deviantart.net/avatars-big/p/i/piranhawt.jpg?2", api.upgradeAvatarQuality(escaped))
+
+        // Wix avatar thumbnail upgraded to 400x400 q_100
+        val wixSmall = "https://images-wixmp.com/f/123/avatar.jpg/v1/fill/w_50,h_50,q_75/avatar.jpg"
+        assertEquals("https://images-wixmp.com/f/123/avatar.jpg/v1/fill/w_400,h_400,q_100/avatar.jpg", api.upgradeAvatarQuality(wixSmall))
+    }
+
+    @Test
+    fun testPredictAvatarUrl() {
+        val api = DeviantArtApi(OkHttpClient())
+        assertEquals("https://a.deviantart.net/avatars-big/t/e/tentuyu.jpg", api.predictAvatarUrl("tentuyu"))
+        assertEquals("https://a.deviantart.net/avatars-big/b/e/beanat.jpg", api.predictAvatarUrl("@BeaNat"))
+        assertEquals("https://a.deviantart.net/avatars-big/x/x/x.jpg", api.predictAvatarUrl("x"))
+    }
+
+    @Test
+    fun testExtractAvatarUrlFromHtmlAndJson() {
+        val api = DeviantArtApi(OkHttpClient())
+        val html = """
+            <!DOCTYPE html>
+            <html>
+            <head><title>BeaNat's Gallery</title></head>
+            <body>
+            <div class="user-block">
+                <a data-username="BeaNat" data-icon="https://a.deviantart.net/avatars/b/e/beanat.jpg?12">
+                    <img alt="BeaNat's avatar" src="https://a.deviantart.net/avatars/b/e/beanat.jpg?12" data-hook="user_avatar"/>
+                </a>
+            </div>
+            <script>
+            window.__INITIAL_STATE__ = JSON.parse("{\"@@entities\":{\"user\":{\"42\":{\"username\":\"BeaNat\",\"usericon\":\"https:\\u002F\\u002Fa.deviantart.net\\u002Favatars\\u002Fb\\u002Fe\\u002Fbeanat.jpg?12\"}}}}");
+            </script>
+            </body>
+            </html>
+        """.trimIndent()
+
+        val doc = Jsoup.parse(html)
+        val extracted = api.extractAvatarUrl(doc, html, "BeaNat")
+        org.junit.Assert.assertNotNull(extracted)
+        // Must be upgraded to avatars-big for high resolution!
+        assertEquals("https://a.deviantart.net/avatars-big/b/e/beanat.jpg?12", extracted)
+    }
+
+    @Test
+    fun testExtractAvatarUrlFromRealSavedHtml() {
+        val file = java.io.File("../../../files/power_nap.html")
+        if (!file.exists()) return
+
+        val html = file.readText()
+        val doc = Jsoup.parse(html)
+        val api = DeviantArtApi(OkHttpClient())
+        val avatar = api.extractAvatarUrl(doc, html, "BluByrdy")
+        org.junit.Assert.assertNotNull(avatar)
+        assertEquals("https://a.deviantart.net/avatars-big/b/l/blubyrdy.jpg?3", avatar)
     }
 
     @Test

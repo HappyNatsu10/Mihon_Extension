@@ -238,6 +238,8 @@ class Feeds(
 
             val media = api.parseMedia(dev["media"])
             val cover = media?.let { api.fullviewUrl(it, raiseQuality = false) }
+                ?: authorObj?.get("usericon")?.jsonPrimitive?.contentOrNull?.let { api.upgradeAvatarQuality(it) }
+                ?: api.predictAvatarUrl(author)
 
             val path = if (url.startsWith("http")) {
                 url.removePrefix("https://www.deviantart.com").removePrefix("http://www.deviantart.com")
@@ -303,6 +305,8 @@ class Feeds(
 
             val media = api.parseMedia(dev["media"])
             val cover = media?.let { api.fullviewUrl(it, raiseQuality = false) }
+                ?: authorId?.let { userMap?.get(it)?.jsonObject?.get("usericon")?.jsonPrimitive?.contentOrNull }?.let { api.upgradeAvatarQuality(it) }
+                ?: api.predictAvatarUrl(author)
             val path = if (url.startsWith("http")) {
                 url.removePrefix("https://www.deviantart.com").removePrefix("http://www.deviantart.com")
             } else {
@@ -363,6 +367,7 @@ class Feeds(
                 ?: item.getElementsByTag("media:content").firstOrNull()?.attr("url")
                 ?: item.selectFirst("media|thumbnail")?.attr("url")
                 ?: item.selectFirst("media|content")?.attr("url")
+                ?: api.predictAvatarUrl(author)
 
             mangas.add(
                 mangaFactory().apply {

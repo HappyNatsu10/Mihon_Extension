@@ -136,7 +136,7 @@ abstract class DeviantArt :
                 author = details.author.ifBlank { resolved.ref.user }
                 artist = details.author.ifBlank { resolved.ref.user }
                 description = details.description
-                thumbnail_url = details.thumbnailUrl
+                thumbnail_url = details.thumbnailUrl ?: api.predictAvatarUrl(resolved.ref.user)
                 status = SManga.COMPLETED
                 genre = "Artwork"
                 initialized = true
@@ -167,7 +167,7 @@ abstract class DeviantArt :
                         title = dto.title ?: "Artwork"
                         this.author = author
                         this.artist = author
-                        thumbnail_url = dto.thumbnailUrl ?: dto.url
+                        thumbnail_url = dto.thumbnailUrl ?: dto.url ?: api.predictAvatarUrl(author)
                         status = SManga.COMPLETED
                         genre = "Artwork"
                         initialized = true
@@ -197,6 +197,7 @@ abstract class DeviantArt :
             this.title = title
             this.author = ref.user
             this.artist = ref.user
+            this.thumbnail_url = api.predictAvatarUrl(ref.user)
             this.status = SManga.ONGOING
             this.genre = if (ref.isFavourites) "Favourites" else "Gallery"
             this.initialized = false
@@ -215,7 +216,9 @@ abstract class DeviantArt :
         author = profile.username
         artist = profile.username
         description = profile.description
-        thumbnail_url = profile.coverUrl ?: profile.avatarUrl
+        thumbnail_url = profile.avatarUrl?.takeIf { it.isNotBlank() }
+            ?: profile.coverUrl?.takeIf { it.isNotBlank() }
+            ?: api.predictAvatarUrl(ref.user)
         status = SManga.ONGOING
         genre = if (ref.isFavourites) "Favourites" else "Gallery"
         initialized = true
@@ -241,7 +244,7 @@ abstract class DeviantArt :
                     author = details.author.ifBlank { manga.author }
                     artist = details.author.ifBlank { manga.artist }
                     description = details.description
-                    thumbnail_url = details.thumbnailUrl ?: manga.thumbnail_url
+                    thumbnail_url = details.thumbnailUrl ?: manga.thumbnail_url ?: api.predictAvatarUrl(details.author)
                     status = SManga.COMPLETED
                     genre = if (details.isPaywalled) "Artwork, Paywalled" else "Artwork"
                     initialized = true
@@ -283,7 +286,10 @@ abstract class DeviantArt :
                 author = profile.username
                 artist = profile.username
                 description = profile.description
-                thumbnail_url = profile.coverUrl ?: profile.avatarUrl ?: manga.thumbnail_url
+                thumbnail_url = profile.avatarUrl?.takeIf { it.isNotBlank() }
+                    ?: profile.coverUrl?.takeIf { it.isNotBlank() }
+                    ?: manga.thumbnail_url?.takeIf { it.isNotBlank() }
+                    ?: api.predictAvatarUrl(ref.user)
                 status = SManga.ONGOING
                 genre = if (ref.isFavourites) "Favourites" else "Gallery"
                 initialized = true
