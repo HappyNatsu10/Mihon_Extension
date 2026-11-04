@@ -85,6 +85,34 @@ object DescriptionRenderer {
         descriptionToText(html)
     }
 
+    fun extractImageDimensions(html: String): Map<String, Pair<Int, Int>> {
+        val imgRegex = Regex("""<img\b[^>]*>""", RegexOption.IGNORE_CASE)
+        val srcRegex = Regex("""\bsrc=["']([^"']+)["']""", RegexOption.IGNORE_CASE)
+        val widthRegex = Regex("""\bwidth=["']?(\d+)["']?""", RegexOption.IGNORE_CASE)
+        val heightRegex = Regex("""\bheight=["']?(\d+)["']?""", RegexOption.IGNORE_CASE)
+
+        val result = mutableMapOf<String, Pair<Int, Int>>()
+        for (m in imgRegex.findAll(html)) {
+            val tag = m.value
+            val src = srcRegex.find(tag)?.groupValues?.get(1) ?: continue
+            val w = widthRegex.find(tag)?.groupValues?.get(1)?.toIntOrNull()
+            val h = heightRegex.find(tag)?.groupValues?.get(1)?.toIntOrNull()
+            if (w != null && h != null && w > 0 && h > 0) {
+                result[src] = Pair(w, h)
+            }
+        }
+        return result
+    }
+
+    fun calculateImageBounds(origW: Int, origH: Int): Pair<Int, Int> {
+        val targetW = if (origW > CONTENT_WIDTH) CONTENT_WIDTH else origW
+        val targetH = ((origH.toLong() * targetW) / origW).toInt().coerceAtLeast(1)
+        val maxH = MAX_PAGE_HEIGHT - (MARGIN * 2) - 100
+        val finalW = if (targetH > maxH) ((targetW.toLong() * maxH) / targetH).toInt().coerceAtLeast(1) else targetW
+        val finalH = if (targetH > maxH) maxH else targetH
+        return Pair(finalW, finalH)
+    }
+
     /**
      * Estimates or computes the number of description pages required for [desc].
      */
@@ -93,12 +121,17 @@ object DescriptionRenderer {
         val textPaint = TextPaint().apply {
             textSize = 40f
         }
+        val imgDims = extractImageDimensions(desc.text)
         val imgCount = Regex("""<img\b""", RegexOption.IGNORE_CASE).findAll(desc.text).count()
         val dummyGetter = if (imgCount > 0) {
-            Html.ImageGetter {
+            Html.ImageGetter { source ->
                 try {
+                    val dims = imgDims[source]
+                    val origW = dims?.first ?: 1152
+                    val origH = dims?.second ?: 800
+                    val (finalW, finalH) = calculateImageBounds(origW, origH)
                     android.graphics.drawable.ColorDrawable(Color.TRANSPARENT).apply {
-                        setBounds(0, 0, CONTENT_WIDTH, 600)
+                        setBounds(0, 0, finalW, finalH)
                     }
                 } catch (_: Throwable) {
                     null
@@ -170,9 +203,11 @@ object DescriptionRenderer {
             isAntiAlias = true
         }
 
+        val imgDims = extractImageDimensions(desc.text)
         val imageGetter = if (fetchImage != null) {
             Html.ImageGetter { source ->
                 try {
+                    val dims = imgDims[source]
                     val bytes = fetchImage(source)
                     if (bytes != null && bytes.isNotEmpty()) {
                         val origBmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
@@ -180,11 +215,7 @@ object DescriptionRenderer {
                             val origW = origBmp.width
                             val origH = origBmp.height
                             if (origW > 0 && origH > 0) {
-                                val targetW = if (origW > CONTENT_WIDTH) CONTENT_WIDTH else origW
-                                var targetH = ((origH.toLong() * targetW) / origW).toInt().coerceAtLeast(1)
-                                val maxH = MAX_PAGE_HEIGHT - (MARGIN * 2) - 100
-                                val finalW = if (targetH > maxH) ((targetW.toLong() * maxH) / targetH).toInt().coerceAtLeast(1) else targetW
-                                val finalH = if (targetH > maxH) maxH else targetH
+                                val (finalW, finalH) = calculateImageBounds(origW, origH)
                                 val scaled = Bitmap.createScaledBitmap(origBmp, finalW, finalH, true)
                                 if (scaled != origBmp) origBmp.recycle()
                                 BitmapDrawable(null, scaled).apply {
@@ -195,6 +226,11 @@ object DescriptionRenderer {
                             }
                         } else {
                             null
+                        }
+                    } else if (dims != null) {
+                        val (finalW, finalH) = calculateImageBounds(dims.first, dims.second)
+                        android.graphics.drawable.ColorDrawable(Color.TRANSPARENT).apply {
+                            setBounds(0, 0, finalW, finalH)
                         }
                     } else {
                         null

@@ -353,6 +353,56 @@ class DescriptionAndGalleryTest {
         val cleaned = cleanDescriptionHtml(tiptapJson)
         assertTrue(cleaned.contains("<font color=\"#0570e6\"><u>@BeaNat</u></font>"))
         assertTrue(cleaned.contains("<img src=\"https://images-wixmp.com/f/test/model.jpg?token=dl_token_123\""))
+        assertTrue(cleaned.contains("width=\"1152\""))
+        assertTrue(cleaned.contains("height=\"1920\""))
         assertTrue(cleaned.contains("<hr>"))
+    }
+
+    @Test
+    fun testMergeWithExistingHidePaywalledFiltersExistingLibraryChapters() {
+        val crawled = listOf(
+            CachedItem(id = "1", title = "Free Artwork", path = "/art/free-1", publishedMs = 1000L, isPaywalled = false),
+            CachedItem(id = "2", title = "Paid Artwork", path = "/art/paid-2", publishedMs = 2000L, isPaywalled = true),
+        )
+        // Existing chapters from previous saves in user's library
+        val existing = listOf(
+            TestChapter().apply {
+                url = "/art/free-1"
+                name = "Free Artwork"
+                scanlator = null
+            },
+            TestChapter().apply {
+                url = "/art/paid-2"
+                name = "Paid Artwork"
+                scanlator = null // was not marked before
+            },
+            TestChapter().apply {
+                url = "/art/old-locked-3"
+                name = "🔒 Old Locked Art"
+                scanlator = "Paywalled"
+            },
+        )
+
+        // When hidePaywalled = true, ALL paywalled chapters must be filtered out!
+        val filtered = mergeWithExisting(crawled, existing, sortById = false, hidePaywalled = true) { TestChapter() }
+        assertEquals(1, filtered.size)
+        assertEquals("/art/free-1", filtered[0].url)
+
+        // When hidePaywalled = false, all are kept and properly flagged
+        val kept = mergeWithExisting(crawled, existing, sortById = false, hidePaywalled = false) { TestChapter() }
+        assertEquals(3, kept.size)
+        val paid2 = kept.first { it.url == "/art/paid-2" }
+        assertEquals("🔒 Paid Artwork", paid2.name)
+        assertEquals("Paywalled", paid2.scanlator)
+    }
+
+    @Test
+    fun testExtractImageDimensions() {
+        val html = """<p><img src="https://images.wixmp.com/art.jpg" width="1152" height="1920"/></p>"""
+        val dims = DescriptionRenderer.extractImageDimensions(html)
+        assertEquals(Pair(1152, 1920), dims["https://images.wixmp.com/art.jpg"])
+        val (finalW, finalH) = DescriptionRenderer.calculateImageBounds(1152, 1920)
+        assertEquals(DescriptionRenderer.CONTENT_WIDTH, finalW)
+        assertEquals(1586, finalH)
     }
 }

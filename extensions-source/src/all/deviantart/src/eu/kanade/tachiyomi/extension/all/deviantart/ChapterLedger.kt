@@ -88,6 +88,15 @@ object ChapterLedger {
             crawledIds.add(item.id)
             val existing = ledger.entries[item.id]
             if (existing != null) {
+                // Update ledger title and isPaywalled if changed
+                if (existing.isPaywalled != item.isPaywalled || existing.title != item.title) {
+                    ledger.entries[item.id] = existing.copy(
+                        title = item.title,
+                        isPaywalled = item.isPaywalled,
+                        publishedMs = if (existing.publishedMs > 0L) existing.publishedMs else item.publishedMs,
+                    )
+                    idsAdded++
+                }
                 // Preserve first-seen path from ledger
                 if (existing.path != item.path) {
                     pathsPreserved++

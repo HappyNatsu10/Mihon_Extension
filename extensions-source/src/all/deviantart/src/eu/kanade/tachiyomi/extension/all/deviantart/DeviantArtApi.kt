@@ -457,7 +457,7 @@ class DeviantArtApi(
         val items = raw.mapNotNull { el ->
             val obj = el.jsonObject
             val dev = (obj["deviation"] as? JsonObject) ?: obj
-            if (hidePaywalled && isPaywalled(dev)) return@mapNotNull null
+            if (hidePaywalled && (isPaywalled(dev) || isPaywalled(obj))) return@mapNotNull null
             val id = dev["deviationId"]?.jsonPrimitive?.longOrNull ?: return@mapNotNull null
             val link = dev["url"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
             val publishedTime = dev["publishedTime"]?.jsonPrimitive?.contentOrNull
@@ -470,7 +470,7 @@ class DeviantArtApi(
             } else {
                 0L
             }
-            val paywalled = isPaywalled(dev)
+            val paywalled = isPaywalled(dev) || isPaywalled(obj)
             CachedItem(
                 id = id.toString(),
                 title = dev["title"]?.jsonPrimitive?.contentOrNull ?: "Untitled",
@@ -903,13 +903,13 @@ class DeviantArtApi(
                 if (additional.isEmpty()) {
                     val addMarker = "\\\"additionalMedia\\\":["
                     val addMarkerUnesc = "\"additionalMedia\":["
-                    var aPos = html.indexOf(addMarker)
+                    var aPos = html.indexOf(addMarker, devPos)
                     var aPrefixLen = addMarker.length
-                    if (aPos == -1) {
-                        aPos = html.indexOf(addMarkerUnesc)
+                    if (aPos == -1 || aPos > devPos + 25000) {
+                        aPos = html.indexOf(addMarkerUnesc, devPos)
                         aPrefixLen = addMarkerUnesc.length
                     }
-                    if (aPos != -1) {
+                    if (aPos != -1 && aPos < devPos + 25000) {
                         var open = 1
                         var endA = -1
                         for (i in (aPos + aPrefixLen) until minOf(html.length, aPos + 60000)) {
@@ -1129,6 +1129,7 @@ class DeviantArtApi(
             if (isMatureBlocked) {
                 throw IOException("This video deviation is age-restricted (mature). Please log in to DeviantArt in the extension WebView to view/play it.")
             }
+            throw IOException("This video deviation could not be loaded or requires login.")
         }
 
         // Check if literature / text deviation
@@ -1146,22 +1147,9 @@ class DeviantArtApi(
         val raiseQuality = (qualityMode == QualityMode.BEST_AVAILABLE)
         val resultPages = mutableListOf<String>()
 
-        // Check original download URL if BEST_AVAILABLE
-        val isDownloadable = doc.selectFirst("a[data-hook=download_button]") != null ||
-            doc.selectFirst("a[aria-label=Download]") != null ||
-            doc.selectFirst("a[data-hook=action_download]") != null ||
-            html.contains("\"isDownloadable\":true") ||
-            html.contains("\"download\":")
-
-        val origUrl = if (isDownloadable && qualityMode == QualityMode.BEST_AVAILABLE) {
-            originalUrl(fullUrl, html)
-        } else {
-            null
-        }
-
-        if (origUrl != null) {
-            resultPages.add(origUrl)
-        } else if (primaryMedia != null) {
+        // Primary artwork image: ALWAYS use fullviewUrl (which handles file.download tokens for lossless originals)
+        // Never use https://www.deviantart.com/download/ which returns HTML error/redirect and crashes decoders
+        if (primaryMedia != null) {
             fullviewUrl(primaryMedia, raiseQuality)?.let { resultPages.add(it) }
         }
 
@@ -1197,10 +1185,9 @@ class DeviantArtApi(
             null
         }
 
-        val mainImage = doc.selectFirst("img[fetchpriority=high]")
+        val mainImage = doc.selectFirst("div[data-hook=art_stage] img")
+            ?: doc.selectFirst("img[fetchpriority=high]")
             ?: doc.selectFirst("img[property=contentUrl]")
-            ?: doc.selectFirst("img[data-hook=deviation_link]")
-            ?: doc.selectFirst("div[data-hook=art_stage] img")
 
         mainImage?.let { img ->
             val src = img.absUrl("src")
@@ -1219,7 +1206,7 @@ class DeviantArtApi(
         val selected = ImageSelector.pickRendition(
             candidates = candidates,
             original = originalDim,
-            isDownloadAllowed = origUrl != null,
+            isDownloadAllowed = false,
             qualityMode = qualityMode,
         )
 
@@ -1272,6 +1259,7 @@ class DeviantArtApi(
         try {
             val root = extractInitialStateJson(html)
             val devObj = devId?.let { root?.get("@@entities")?.jsonObject?.get("deviation")?.jsonObject?.get(it)?.jsonObject }
+                ?: (if (root?.get("deviationId")?.jsonPrimitive?.contentOrNull == devId || root?.get("deviationId")?.jsonPrimitive?.longOrNull?.toString() == devId) root else null)
             val mediaObj = devObj?.get("media") as? JsonObject
             val types = mediaObj?.get("types")?.jsonArray?.mapNotNull { it as? JsonObject }.orEmpty()
             for (t in types) {
@@ -1287,24 +1275,51 @@ class DeviantArtApi(
             }
         } catch (_: Exception) {}
 
-        // 2. Direct regex search for MP4 in deviation snippet
-        if (!devId.isNullOrBlank()) {
-            val devIdMarkers = listOf(""""deviationId":$devId""", """"deviationId":"$devId"""", devId)
-            for (marker in devIdMarkers) {
-                var pos = unescaped.indexOf(marker)
-                while (pos != -1) {
-                    val start = (pos - 2000).coerceAtLeast(0)
-                    val end = (pos + 35000).coerceAtMost(unescaped.length)
-                    val snippet = unescaped.substring(start, end)
-                    val directVideos = Regex("""https?://[^\s"\'<>]+\.mp4[^\s"\'<>]*""", RegexOption.IGNORE_CASE)
-                        .findAll(snippet)
-                        .map { it.value }
-                        .toList()
-                    result.addAll(directVideos)
-                    if (result.isNotEmpty()) break
-                    pos = unescaped.indexOf(marker, pos + 1)
+        // 2. Search for MP4 strictly within devId's entity JSON block
+        if (result.isEmpty() && !devId.isNullOrBlank()) {
+            val devMarkers = listOf(""""$devId":{""", """\"$devId\":{""", """"deviationId":$devId""", """"deviationId":"$devId"""")
+            for (marker in devMarkers) {
+                val pos = unescaped.indexOf(marker)
+                if (pos != -1) {
+                    var objStart = pos
+                    if (marker.contains("deviationId")) {
+                        var depth = 0
+                        for (j in pos downTo 0) {
+                            if (unescaped[j] == '}') {
+                                depth++
+                            } else if (unescaped[j] == '{') {
+                                if (depth == 0) {
+                                    objStart = j
+                                    break
+                                }
+                                depth--
+                            }
+                        }
+                    }
+                    var open = 1
+                    var endPos = -1
+                    val startScan = objStart + 1
+                    for (i in startScan until minOf(unescaped.length, startScan + 30000)) {
+                        if (unescaped[i] == '{') {
+                            open++
+                        } else if (unescaped[i] == '}') {
+                            open--
+                            if (open == 0) {
+                                endPos = i + 1
+                                break
+                            }
+                        }
+                    }
+                    if (endPos != -1) {
+                        val snippet = unescaped.substring(objStart, endPos)
+                        val directVideos = Regex("""https?://[^\s"\'<>]+\.mp4[^\s"\'<>]*""", RegexOption.IGNORE_CASE)
+                            .findAll(snippet)
+                            .map { it.value }
+                            .toList()
+                        result.addAll(directVideos)
+                        if (result.isNotEmpty()) break
+                    }
                 }
-                if (result.isNotEmpty()) break
             }
         }
 
@@ -1349,7 +1364,7 @@ class DeviantArtApi(
 
         private val NUMBER_OF_ITEMS_REGEX = Regex(""""numberOfItems"\s*:\s*(\d+)""")
         private val WORKS_OF_ART_REGEX = Regex("""(\d[\d,]*)\s+works of art""", RegexOption.IGNORE_CASE)
-        private val DEVIATION_ID_REGEX = Regex("""-(\d+)$""")
+        private val DEVIATION_ID_REGEX = Regex("""-(\d+)(?:[/?#].*)?$""")
         private val IMAGE_ORIGINAL_URL_REGEX = Regex("""/v1(/.*)?(?=\?)""")
     }
 }

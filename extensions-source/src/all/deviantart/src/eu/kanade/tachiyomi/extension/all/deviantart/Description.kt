@@ -47,6 +47,32 @@ private val jsonParser = Json {
     isLenient = true
 }
 
+fun resolveMediaDimensions(mediaObj: JsonObject): Pair<Int, Int>? {
+    val types = mediaObj["types"]?.jsonArray?.mapNotNull { it as? JsonObject }.orEmpty()
+    val fullview = types.firstOrNull { it["t"]?.jsonPrimitive?.contentOrNull == "fullview" }
+    val preview = types.firstOrNull { it["t"]?.jsonPrimitive?.contentOrNull == "preview" }
+    var w = fullview?.get("w")?.jsonPrimitive?.intOrNull
+        ?: preview?.get("w")?.jsonPrimitive?.intOrNull
+        ?: types.maxOfOrNull { it["w"]?.jsonPrimitive?.intOrNull ?: 0 }?.takeIf { it > 0 }
+    var h = fullview?.get("h")?.jsonPrimitive?.intOrNull
+        ?: preview?.get("h")?.jsonPrimitive?.intOrNull
+        ?: types.maxOfOrNull { it["h"]?.jsonPrimitive?.intOrNull ?: 0 }?.takeIf { it > 0 }
+
+    if (w == null || h == null) {
+        val c = fullview?.get("c")?.jsonPrimitive?.contentOrNull
+            ?: preview?.get("c")?.jsonPrimitive?.contentOrNull
+        if (c != null) {
+            val dimMatch = Regex("""w_(\d+),h_(\d+)""").find(c)
+            if (dimMatch != null) {
+                w = dimMatch.groupValues[1].toIntOrNull()
+                h = dimMatch.groupValues[2].toIntOrNull()
+            }
+        }
+    }
+
+    return if (w != null && h != null && w > 0 && h > 0) Pair(w, h) else null
+}
+
 /**
  * Resolves high-resolution image URL from a DeviantArt media JSON object (including Wix CDN file.download tokens).
  */
@@ -279,10 +305,14 @@ fun extractTextOrHtmlFromDraftOrTiptap(raw: String): String {
                                     ?: attrs?.get("downloadUrl")?.jsonPrimitive?.contentOrNull
                             }
                             if (!src.isNullOrBlank()) {
+                                val dims = if (devMedia != null) resolveMediaDimensions(devMedia) else null
+                                val w = dims?.first ?: attrs?.get("width")?.jsonPrimitive?.intOrNull
+                                val h = dims?.second ?: attrs?.get("height")?.jsonPrimitive?.intOrNull
+                                val dimAttr = if (w != null && h != null && w > 0 && h > 0) " width=\"$w\" height=\"$h\"" else ""
                                 val align = attrs?.get("alignment")?.jsonPrimitive?.contentOrNull
                                     ?: attrs?.get("textAlign")?.jsonPrimitive?.contentOrNull
                                 val alignAttr = if (align in listOf("center", "right", "left")) " align=\"$align\"" else ""
-                                sb.append("<p$alignAttr><img src=\"$src\"/></p>")
+                                sb.append("<p$alignAttr><img src=\"$src\"$dimAttr/></p>")
                             }
                         }
                         "da-mention" -> {
@@ -313,8 +343,14 @@ fun extractTextOrHtmlFromDraftOrTiptap(raw: String): String {
                             node["content"]?.jsonArray?.forEach { walk(it) }
                             val endLen = sb.length
                             if (endLen > startLen) {
-                                sb.insert(startLen, "<p$alignAttr>")
-                                sb.append("</p>")
+                                val added = sb.substring(startLen, endLen)
+                                if (added.isNotBlank()) {
+                                    sb.insert(startLen, "<p$alignAttr>")
+                                    sb.append("</p>")
+                                } else {
+                                    sb.setLength(startLen)
+                                    sb.append("<p><br/></p>")
+                                }
                             } else {
                                 sb.append("<p><br/></p>")
                             }
@@ -407,7 +443,11 @@ fun cleanDescriptionHtml(html: String): String {
         }
     }
 
-    return doc.body().html().trim()
+    val rawHtml = doc.body().html().trim()
+    return rawHtml
+        .replace(Regex("""(<p[^>]*>\s*<br\s*/?>\s*</p>\s*){2,}""", RegexOption.IGNORE_CASE), "<p><br/></p>")
+        .replace(Regex("""(<br\s*/?>\s*){3,}""", RegexOption.IGNORE_CASE), "<br/><br/>")
+        .trim()
 }
 
 /**

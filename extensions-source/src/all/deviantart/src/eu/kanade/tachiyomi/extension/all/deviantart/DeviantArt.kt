@@ -331,7 +331,12 @@ abstract class DeviantArt :
                     }
                 }
 
-                updatedChapters = mergeWithExisting(items, chapters, sortById = !ref.isFavourites)
+                updatedChapters = mergeWithExisting(
+                    crawled = items,
+                    existing = chapters,
+                    sortById = !ref.isFavourites,
+                    hidePaywalled = preferences.hidePaywalled,
+                )
             }
         }
 
@@ -376,7 +381,8 @@ abstract class DeviantArt :
         val devId = trailingIdRegex.find(chapterUrl)?.groupValues?.get(1)
             ?: chapterUrl.substringAfterLast("-").substringAfterLast("/")
 
-        if (preferences.showDescription && devId.isNotBlank()) {
+        val hasVideo = images.any { it.contains(".mp4", ignoreCase = true) }
+        if (preferences.showDescription && devId.isNotBlank() && !hasVideo) {
             val desc = DescriptionStore.get(devId) ?: api.fetchArtworkDescription(chapterUrl)
             if (desc != null && desc.text.isNotBlank()) {
                 val maxPages = preferences.descriptionMaxPages
@@ -571,13 +577,19 @@ internal fun mergeWithExisting(
     crawled: List<CachedItem>,
     existing: List<SChapter>,
     sortById: Boolean,
+    hidePaywalled: Boolean = false,
     chapterFactory: () -> SChapter = { SChapter.create() },
 ): List<SChapter> {
     val byKey = LinkedHashMap<String, SChapter>()
     val crawledOrder = ArrayList<String>()
+    val paywalledKeys = HashSet<String>()
 
     for (item in crawled) {
         val key = chapterKey(item.path)
+        if (item.isPaywalled) {
+            paywalledKeys.add(key)
+        }
+        if (hidePaywalled && item.isPaywalled) continue
         crawledOrder.add(key)
         val cleanTitle = item.title.removePrefix("🔒 ")
         byKey[key] = chapterFactory().apply {
@@ -591,12 +603,24 @@ internal fun mergeWithExisting(
         if (old.url.contains("batch=")) continue // chapters from the optional batch mode
         val key = chapterKey(old.url)
         val fresh = byKey[key]
+        val isPaywalled = key in paywalledKeys ||
+            fresh?.scanlator == "Paywalled" ||
+            old.scanlator == "Paywalled" ||
+            old.name.startsWith("🔒 ") ||
+            fresh?.name?.startsWith("🔒 ") == true
+
+        if (hidePaywalled && isPaywalled) {
+            byKey.remove(key)
+            continue
+        }
+
+        val cleanTitle = (fresh?.name ?: old.name).removePrefix("🔒 ")
         // keep the STORED url so Mihon keeps matching the same chapter (and its read state)
         byKey[key] = chapterFactory().apply {
             url = old.url
-            name = fresh?.name ?: old.name
+            name = if (isPaywalled) "🔒 $cleanTitle" else cleanTitle
             date_upload = fresh?.date_upload?.takeIf { it > 0L } ?: old.date_upload
-            scanlator = if (fresh != null) fresh.scanlator else old.scanlator
+            scanlator = if (isPaywalled) "Paywalled" else null
         }
     }
 

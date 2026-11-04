@@ -122,7 +122,7 @@ object GalleryCache {
 
         return mutex.withLock {
             val cached = loadCache(user, folderId, isFavourites)
-            val validCached = cached?.takeIf { it.schemaVersion >= 2 }
+            val validCached = cached?.takeIf { it.schemaVersion >= 3 }
 
             if (validCached != null && validCached.complete && validCached.items.isNotEmpty()) {
                 // Incremental refresh: fetch page by page from offset 0 until a known id is found
@@ -157,7 +157,7 @@ object GalleryCache {
 
                 val finalItems = if (newItems.isNotEmpty()) {
                     val combined = newItems + validCached.items
-                    saveCache(user, folderId, isFavourites, GalleryCacheData(schemaVersion = 2, complete = true, items = combined))
+                    saveCache(user, folderId, isFavourites, GalleryCacheData(schemaVersion = 3, complete = true, items = combined))
                     combined
                 } else {
                     validCached.items
@@ -211,7 +211,7 @@ object GalleryCache {
                             user,
                             folderId,
                             isFavourites,
-                            GalleryCacheData(schemaVersion = 2, complete = false, items = partialItems, nextOffset = offset),
+                            GalleryCacheData(schemaVersion = 3, complete = false, items = partialItems, nextOffset = offset),
                         )
                         pagesSinceSave = 0
                     }
@@ -237,7 +237,7 @@ object GalleryCache {
                     user,
                     folderId,
                     isFavourites,
-                    GalleryCacheData(schemaVersion = 2, complete = isComplete, items = partialItems, nextOffset = if (isComplete) null else offset),
+                    GalleryCacheData(schemaVersion = 3, complete = isComplete, items = partialItems, nextOffset = if (isComplete) null else offset),
                 )
                 // Reconcile with permanent ChapterLedger
                 ChapterLedger.recordChapters(user, folderId, isFavourites, partialItems, debugLog)
@@ -246,7 +246,7 @@ object GalleryCache {
                     user,
                     folderId,
                     isFavourites,
-                    GalleryCacheData(schemaVersion = 2, complete = false, items = partialItems, nextOffset = offset),
+                    GalleryCacheData(schemaVersion = 3, complete = false, items = partialItems, nextOffset = offset),
                 )
                 if (partialItems.isNotEmpty()) {
                     return@withLock ChapterLedger.recordChapters(user, folderId, isFavourites, partialItems, debugLog)

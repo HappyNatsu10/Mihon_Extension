@@ -52,4 +52,23 @@ class GalleryCacheTest {
         // Middle item is index 50 -> chapter 50.0
         assertEquals(50.0f, GalleryCache.chapterNumber(50, total))
     }
+
+    @Test
+    fun testSchemaVersion3Required() {
+        val tempDir = java.nio.file.Files.createTempDirectory("da_cache_test").toFile()
+        try {
+            GalleryCache.customStorageDir = tempDir
+            // Save cache with schemaVersion = 2
+            val oldCache = GalleryCacheData(schemaVersion = 2, complete = true, items = listOf(CachedItem("1", "Old", "/art/old", 100L)))
+            GalleryCache.saveCache("testuser", "all", false, oldCache)
+
+            val loaded = GalleryCache.loadCache("testuser", "all", false)
+            assertEquals(2, loaded?.schemaVersion)
+            // schemaVersion >= 3 check
+            assertTrue(loaded?.schemaVersion != null && loaded.schemaVersion < 3)
+        } finally {
+            GalleryCache.customStorageDir = null
+            tempDir.deleteRecursively()
+        }
+    }
 }
