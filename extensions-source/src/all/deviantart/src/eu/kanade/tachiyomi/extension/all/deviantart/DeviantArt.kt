@@ -486,8 +486,8 @@ abstract class DeviantArt :
         val descriptionMaxPagesPref = ListPreference(screen.context).apply {
             key = PREF_DESCRIPTION_MAX_PAGES_KEY
             title = "Maximum description pages"
-            entries = arrayOf("1 page", "2 pages", "3 pages", "5 pages", "10 pages (Default)", "15 pages", "20 pages", "30 pages", "50 pages")
-            entryValues = arrayOf("1", "2", "3", "5", "10", "15", "20", "30", "50")
+            entries = arrayOf("1 page", "2 pages", "3 pages", "5 pages", "10 pages (Default)", "15 pages", "20 pages", "30 pages", "50 pages", "75 pages", "100 pages")
+            entryValues = arrayOf("1", "2", "3", "5", "10", "15", "20", "30", "50", "75", "100")
             summary = "Current: %s"
             setDefaultValue("10")
         }
@@ -541,7 +541,7 @@ abstract class DeviantArt :
         get() = getBoolean(PREF_SHOW_DESCRIPTION_KEY, true)
 
     private val SharedPreferences.descriptionMaxPages: Int
-        get() = getString(PREF_DESCRIPTION_MAX_PAGES_KEY, "10")?.toIntOrNull()?.coerceIn(1, 50) ?: 10
+        get() = getString(PREF_DESCRIPTION_MAX_PAGES_KEY, "10")?.toIntOrNull()?.coerceIn(1, 100) ?: 10
 
     companion object {
         private const val PREF_CHAPTER_MODE_KEY = "chapter_mode"

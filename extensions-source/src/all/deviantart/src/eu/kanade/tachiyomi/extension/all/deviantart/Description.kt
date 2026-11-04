@@ -48,17 +48,78 @@ private val jsonParser = Json {
 }
 
 /**
+ * Resolves high-resolution image URL from a DeviantArt media JSON object (including Wix CDN file.download tokens).
+ */
+fun resolveMediaUrl(mediaObj: JsonObject): String? {
+    val baseUri = mediaObj["baseUri"]?.jsonPrimitive?.contentOrNull ?: return null
+    val prettyName = mediaObj["prettyName"]?.jsonPrimitive?.contentOrNull.orEmpty()
+    val tokens = mediaObj["token"]?.jsonArray?.mapNotNull { it.jsonPrimitive.contentOrNull }.orEmpty()
+    val dlToken = tokens.firstOrNull { token ->
+        try {
+            val parts = token.split(".")
+            if (parts.size >= 2) {
+                val padded = parts[1] + "=".repeat((4 - parts[1].length % 4) % 4)
+                val decoded = String(java.util.Base64.getUrlDecoder().decode(padded))
+                decoded.contains("file.download")
+            } else {
+                false
+            }
+        } catch (_: Throwable) {
+            false
+        }
+    } ?: tokens.firstOrNull()
+
+    // 1. If baseUri is direct full image file (.jpg, .png, etc.) and we have a download token, return it
+    if ((baseUri.endsWith(".jpg", ignoreCase = true) || baseUri.endsWith(".png", ignoreCase = true) || baseUri.endsWith(".webp", ignoreCase = true)) && dlToken != null) {
+        return "$baseUri?token=$dlToken"
+    }
+
+    // 2. Otherwise look in types for fullview or preview
+    val types = mediaObj["types"]?.jsonArray?.mapNotNull { it as? JsonObject }.orEmpty()
+    val targetType = types.firstOrNull { it["t"]?.jsonPrimitive?.contentOrNull == "fullview" && it["c"] != null }
+        ?: types.firstOrNull { it["t"]?.jsonPrimitive?.contentOrNull == "preview" && it["c"] != null }
+        ?: types.firstOrNull { it["c"] != null }
+        ?: types.firstOrNull { it["s"] != null }
+
+    if (targetType != null) {
+        val s = targetType["s"]?.jsonPrimitive?.contentOrNull
+        if (!s.isNullOrBlank()) return s
+        val c = targetType["c"]?.jsonPrimitive?.contentOrNull
+        if (!c.isNullOrBlank()) {
+            val path = c.replace("<prettyName>", prettyName).replace("\u003CprettyName\u003E", prettyName)
+            val full = if (baseUri.endsWith("/") && path.startsWith("/")) {
+                baseUri + path.substring(1)
+            } else {
+                baseUri + path
+            }
+            val tok = tokens.firstOrNull()
+            return if (tok != null && !full.contains("token=")) "$full?token=$tok" else full
+        }
+    }
+
+    if (baseUri.startsWith("http")) {
+        return if (dlToken != null && !baseUri.contains("token=")) "$baseUri?token=$dlToken" else baseUri
+    }
+
+    return null
+}
+
+/**
  * Extracts clean text or HTML from Draft.js / TipTap / ProseMirror JSON or AST dumps.
  */
 fun extractTextOrHtmlFromDraftOrTiptap(raw: String): String {
     val trimmed = raw.trim()
-    if (!trimmed.startsWith("{") && !trimmed.startsWith("{\\")) return raw
-    if (trimmed.length < 10) return "" // Discard corrupt stubs like "{\" or "{\\"
+    var s = trimmed
+    if (s.startsWith("\"") && s.endsWith("\"") && s.length > 2) {
+        s = s.substring(1, s.length - 1)
+    }
+    if (!s.startsWith("{") && !s.startsWith("{\\")) return raw
+    if (s.length < 10) return "" // Discard corrupt stubs like "{\" or "{\\"
 
     // 1. Check for 'excerpt' in JSON structure (only if no full rich document or blocks AST)
     val excerptRegex = Regex(""""excerpt"\s*:\s*"((?:\\.|[^"\\])*)"""")
-    val excerptMatch = excerptRegex.find(trimmed)
-    if (excerptMatch != null && !trimmed.contains("\"document\"") && !trimmed.contains("\"blocks\"")) {
+    val excerptMatch = excerptRegex.find(s)
+    if (excerptMatch != null && !s.contains("\"document\"") && !s.contains("\"blocks\"")) {
         val excerpt = excerptMatch.groupValues[1]
             .replace("\\n", "\n")
             .replace("\\\"", "\"")
@@ -69,10 +130,10 @@ fun extractTextOrHtmlFromDraftOrTiptap(raw: String): String {
     }
 
     try {
-        val unescaped = if (trimmed.startsWith("{\\")) {
-            trimmed.replace("\\\"", "\"").replace("\\'", "'").replace("\\/", "/").replace("\\\\", "\\")
+        val unescaped = if (s.contains("\\\"") || s.contains("\\/") || s.startsWith("{\\")) {
+            s.replace("\\\"", "\"").replace("\\'", "'").replace("\\/", "/").replace("\\\\", "\\")
         } else {
-            trimmed
+            s
         }
         val element = jsonParser.parseToJsonElement(unescaped)
         val rootObj = element as? JsonObject
@@ -201,17 +262,34 @@ fun extractTextOrHtmlFromDraftOrTiptap(raw: String): String {
                             if ("bold" in marks) styled = "<b>$styled</b>"
                             if ("italic" in marks) styled = "<i>$styled</i>"
                             if ("underline" in marks) styled = "<u>$styled</u>"
+                            if ("strike" in marks) styled = "<s>$styled</s>"
                             if ("link" in marks) styled = "<font color=\"#0570e6\"><u>$styled</u></font>"
                             sb.append(styled)
                         }
-                        "image", "media", "deviation", "embed" -> {
+                        "image", "media", "deviation", "embed", "da-deviation", "da-image" -> {
                             val attrs = node["attrs"]?.jsonObject
-                            val src = attrs?.get("src")?.jsonPrimitive?.contentOrNull
-                                ?: attrs?.get("url")?.jsonPrimitive?.contentOrNull
-                                ?: attrs?.get("originalUrl")?.jsonPrimitive?.contentOrNull
-                                ?: attrs?.get("downloadUrl")?.jsonPrimitive?.contentOrNull
+                            val devMedia = attrs?.get("deviation")?.jsonObject?.get("media")?.jsonObject
+                                ?: attrs?.get("media")?.jsonObject
+                            val src = if (devMedia != null) {
+                                resolveMediaUrl(devMedia)
+                            } else {
+                                attrs?.get("src")?.jsonPrimitive?.contentOrNull
+                                    ?: attrs?.get("url")?.jsonPrimitive?.contentOrNull
+                                    ?: attrs?.get("originalUrl")?.jsonPrimitive?.contentOrNull
+                                    ?: attrs?.get("downloadUrl")?.jsonPrimitive?.contentOrNull
+                            }
                             if (!src.isNullOrBlank()) {
-                                sb.append("<p><img src=\"$src\"/></p>")
+                                val align = attrs?.get("alignment")?.jsonPrimitive?.contentOrNull
+                                    ?: attrs?.get("textAlign")?.jsonPrimitive?.contentOrNull
+                                val alignAttr = if (align in listOf("center", "right", "left")) " align=\"$align\"" else ""
+                                sb.append("<p$alignAttr><img src=\"$src\"/></p>")
+                            }
+                        }
+                        "da-mention" -> {
+                            val username = node["attrs"]?.jsonObject?.get("user")?.jsonObject?.get("username")?.jsonPrimitive?.contentOrNull
+                                ?: node["attrs"]?.jsonObject?.get("username")?.jsonPrimitive?.contentOrNull
+                            if (!username.isNullOrBlank()) {
+                                sb.append("<font color=\"#0570e6\"><u>@$username</u></font>")
                             }
                         }
                         "heading" -> {
@@ -229,11 +307,13 @@ fun extractTextOrHtmlFromDraftOrTiptap(raw: String): String {
                         "horizontalRule" -> sb.append("<hr/>")
                         "hardBreak" -> sb.append("<br/>")
                         "paragraph" -> {
+                            val align = node["attrs"]?.jsonObject?.get("textAlign")?.jsonPrimitive?.contentOrNull
+                            val alignAttr = if (align in listOf("center", "right", "left")) " align=\"$align\"" else ""
                             val startLen = sb.length
                             node["content"]?.jsonArray?.forEach { walk(it) }
                             val endLen = sb.length
                             if (endLen > startLen) {
-                                sb.insert(startLen, "<p>")
+                                sb.insert(startLen, "<p$alignAttr>")
                                 sb.append("</p>")
                             } else {
                                 sb.append("<p><br/></p>")

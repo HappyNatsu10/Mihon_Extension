@@ -126,7 +126,16 @@ class DeviantArtApi(
             val root = extractInitialStateJson(html)
             val devId = trailingIdRegex.find(path)?.groupValues?.get(1) ?: path.substringAfterLast("-").substringAfterLast("/")
             val devObj = root?.get("@@entities")?.jsonObject?.get("deviation")?.jsonObject?.get(devId)?.jsonObject
-            val paywalled = devObj?.let { isPaywalled(it) } ?: (html.contains("\"isLocked\":true") || html.contains("\"isPaidContent\":true"))
+            val paywalled = devObj?.let { isPaywalled(it) } ?: (
+                html.contains("\"isLocked\":true") ||
+                    html.contains("\"isPaidContent\":true") ||
+                    html.contains("\"isTier\":true") ||
+                    html.contains("\"tierId\":") ||
+                    html.contains("\"hasTierAccess\":false") ||
+                    html.contains("\"isExclusive\":true") ||
+                    html.contains("\"isEarlyAccess\":true") ||
+                    html.contains("\"isSupporterOnly\":true")
+                )
 
             ArtworkDetails(
                 title = title,
@@ -476,24 +485,76 @@ class DeviantArtApi(
     }
 
     fun isPaywalled(dev: JsonObject): Boolean {
+        // 1. Explicit lock or paid flags
         if (dev["isLocked"]?.jsonPrimitive?.booleanOrNull == true) return true
         if (dev["isPaidContent"]?.jsonPrimitive?.booleanOrNull == true) return true
+
+        // 2. Subscription tier flags
+        if (dev["isTier"]?.jsonPrimitive?.booleanOrNull == true) return true
+        if (dev["hasTierAccess"]?.jsonPrimitive?.booleanOrNull == false) return true
+        if (dev["tierId"]?.jsonPrimitive?.contentOrNull?.isNotBlank() == true) return true
         val tier = dev["tier"]
-        if (tier != null && tier !is kotlinx.serialization.json.JsonNull) return true
+        if (tier != null && tier !is kotlinx.serialization.json.JsonNull) {
+            if (tier !is kotlinx.serialization.json.JsonPrimitive || tier.content.isNotBlank()) return true
+        }
+
+        // 3. Exclusives & supporter only
+        if (dev["isExclusive"]?.jsonPrimitive?.booleanOrNull == true) return true
+        val exclusive = dev["exclusive"]
+        if (exclusive != null && exclusive !is kotlinx.serialization.json.JsonNull) return true
+        if (dev["isSupporterOnly"]?.jsonPrimitive?.booleanOrNull == true) return true
+        if (dev["supporterOnly"]?.jsonPrimitive?.booleanOrNull == true) return true
+
+        // 4. Early access
+        if (dev["isEarlyAccess"]?.jsonPrimitive?.booleanOrNull == true) return true
+        val earlyAccess = dev["earlyAccess"]
+        if (earlyAccess != null && earlyAccess !is kotlinx.serialization.json.JsonNull) return true
+
+        // 5. Access string
+        val access = dev["access"]?.jsonPrimitive?.contentOrNull?.lowercase()
+        if (access in listOf("tier", "subscribers", "subscriber", "exclusive", "locked", "paywall")) return true
+
+        // 6. Monetization object
+        val monetization = dev["monetization"] as? JsonObject
+        if (monetization != null) {
+            if (monetization["isTier"]?.jsonPrimitive?.booleanOrNull == true) return true
+            if (monetization["tierId"]?.jsonPrimitive?.contentOrNull?.isNotBlank() == true) return true
+            if (monetization["hasTierAccess"]?.jsonPrimitive?.booleanOrNull == false) return true
+            val mType = monetization["type"]?.jsonPrimitive?.contentOrNull?.lowercase()
+            if (mType in listOf("tier", "subscription", "exclusive")) return true
+        }
+
+        // 7. Premium folder
         val premiumFolder = dev["premiumFolderData"]
         if (premiumFolder != null && premiumFolder !is kotlinx.serialization.json.JsonNull) return true
 
+        // 8. Block reasons
         val blockReasons = dev["blockReasons"]?.jsonArray?.mapNotNull { it.jsonPrimitive.contentOrNull }.orEmpty()
         if (blockReasons.any { r ->
                 r.contains("tier", ignoreCase = true) ||
                     r.contains("sub", ignoreCase = true) ||
                     r.contains("pay", ignoreCase = true) ||
-                    r.contains("lock", ignoreCase = true)
+                    r.contains("lock", ignoreCase = true) ||
+                    r.contains("exclusive", ignoreCase = true) ||
+                    r.contains("supporter", ignoreCase = true) ||
+                    r.contains("early_access", ignoreCase = true)
             }
         ) {
             return true
         }
 
+        // 9. Extended metadata if nested
+        val ext = dev["extended"] as? JsonObject
+        if (ext != null) {
+            if (ext["isTier"]?.jsonPrimitive?.booleanOrNull == true) return true
+            if (ext["tierId"]?.jsonPrimitive?.contentOrNull?.isNotBlank() == true) return true
+            if (ext["hasTierAccess"]?.jsonPrimitive?.booleanOrNull == false) return true
+            if (ext["isExclusive"]?.jsonPrimitive?.booleanOrNull == true) return true
+            val extTier = ext["tier"]
+            if (extTier != null && extTier !is kotlinx.serialization.json.JsonNull) return true
+        }
+
+        // 10. Purchasable without viewable fullview/preview
         val mediaObj = dev["media"] as? JsonObject
         val types = mediaObj?.get("types")?.jsonArray
         val hasViewable = types != null && types.isNotEmpty() && types.any {
@@ -936,28 +997,35 @@ class DeviantArtApi(
             val root = extractInitialStateJson(html)
             val devExt = root?.get("@@entities")?.jsonObject?.get("deviationExtended")?.jsonObject?.get(devId)?.jsonObject
                 ?: root?.get("@@entities")?.jsonObject?.get("deviation")?.jsonObject?.get(devId)?.jsonObject?.get("extended")?.jsonObject
-            if (devExt != null) {
-                val candidate = devExt["descriptionText"]?.jsonObject?.get("html")?.jsonObject?.get("markup")?.jsonPrimitive?.contentOrNull
-                    ?: devExt["bodyText"]?.jsonObject?.get("html")?.jsonObject?.get("markup")?.jsonPrimitive?.contentOrNull
-                    ?: devExt["body"]?.jsonObject?.get("markup")?.jsonPrimitive?.contentOrNull
-                    ?: devExt["description"]?.jsonObject?.get("markup")?.jsonPrimitive?.contentOrNull
-                    ?: devExt["description"]?.jsonObject?.get("draft")?.jsonPrimitive?.contentOrNull
-                    ?: devExt["description"]?.jsonObject?.get("html")?.jsonObject?.get("markup")?.jsonPrimitive?.contentOrNull
-                    ?: devExt["bodyText"]?.jsonObject?.get("html")?.jsonPrimitive?.contentOrNull
-                    ?: devExt["descriptionText"]?.jsonObject?.get("html")?.jsonPrimitive?.contentOrNull
-                    ?: devExt["descriptionText"]?.jsonObject?.get("excerpt")?.jsonPrimitive?.contentOrNull
-                if (!candidate.isNullOrBlank()) {
-                    rawText = cleanDescriptionHtml(candidate)
-                }
+            val devObj = root?.get("@@entities")?.jsonObject?.get("deviation")?.jsonObject?.get(devId)?.jsonObject
+
+            val candidate = devExt?.get("descriptionText")?.jsonObject?.get("html")?.jsonObject?.get("markup")?.jsonPrimitive?.contentOrNull
+                ?: devExt?.get("bodyText")?.jsonObject?.get("html")?.jsonObject?.get("markup")?.jsonPrimitive?.contentOrNull
+                ?: devExt?.get("body")?.jsonObject?.get("markup")?.jsonPrimitive?.contentOrNull
+                ?: devExt?.get("description")?.jsonObject?.get("markup")?.jsonPrimitive?.contentOrNull
+                ?: devExt?.get("description")?.jsonObject?.get("draft")?.jsonPrimitive?.contentOrNull
+                ?: devExt?.get("description")?.jsonObject?.get("html")?.jsonObject?.get("markup")?.jsonPrimitive?.contentOrNull
+                ?: devExt?.get("bodyText")?.jsonObject?.get("html")?.jsonPrimitive?.contentOrNull
+                ?: devExt?.get("descriptionText")?.jsonObject?.get("html")?.jsonPrimitive?.contentOrNull
+                ?: devExt?.get("descriptionText")?.jsonObject?.get("excerpt")?.jsonPrimitive?.contentOrNull
+                ?: devObj?.get("descriptionText")?.jsonObject?.get("html")?.jsonObject?.get("markup")?.jsonPrimitive?.contentOrNull
+                ?: devObj?.get("descriptionText")?.jsonObject?.get("html")?.jsonPrimitive?.contentOrNull
+                ?: devObj?.get("description")?.jsonObject?.get("markup")?.jsonPrimitive?.contentOrNull
+                ?: devObj?.get("description")?.jsonObject?.get("html")?.jsonObject?.get("markup")?.jsonPrimitive?.contentOrNull
+                ?: devObj?.get("descriptionText")?.jsonObject?.get("excerpt")?.jsonPrimitive?.contentOrNull
+
+            if (!candidate.isNullOrBlank()) {
+                rawText = cleanDescriptionHtml(candidate)
             }
         } catch (_: Exception) {}
 
         // 2. Direct regex search in HTML for description or body markup
         if (rawText.isBlank()) {
             try {
+                val descMarkupRegex = Regex(""""descriptionText"\s*:\s*\{[^{}]*"html"\s*:\s*\{[^{}]*"markup"\s*:\s*"((?:\\.|[^"\\])*)"""")
                 val bodyMarkupRegex = Regex(""""body"\s*:\s*\{\s*"markup"\s*:\s*"((?:\\.|[^"\\])*)"""")
-                val descMarkupRegex = Regex(""""description"\s*:\s*\{\s*"markup"\s*:\s*"((?:\\.|[^"\\])*)"""")
-                val match = bodyMarkupRegex.find(html) ?: descMarkupRegex.find(html)
+                val descLegacyMarkupRegex = Regex(""""description"\s*:\s*\{\s*"markup"\s*:\s*"((?:\\.|[^"\\])*)"""")
+                val match = descMarkupRegex.find(html) ?: bodyMarkupRegex.find(html) ?: descLegacyMarkupRegex.find(html)
                 if (match != null) {
                     val unescaped = match.groupValues[1]
                         .replace("\\\"", "\"")
@@ -1046,13 +1114,20 @@ class DeviantArtApi(
         val videoUrls = extractVideoUrls(html, devId)
         val bestVideo = pickBestVideoUrl(videoUrls, qualityMode)
         if (bestVideo != null) {
-            val poster = doc.selectFirst("meta[property=og:image]")?.attr("content")?.takeIf { isArtworkUrl(it) }
-                ?: doc.selectFirst("img[fetchpriority=high]")?.absUrl("src")?.takeIf { isArtworkUrl(it) }
-            val maximizedPoster = poster?.let { ImageSelector.maximizeRendition(it) }
-            return if (maximizedPoster != null) {
-                listOf(maximizedPoster, bestVideo)
-            } else {
-                listOf(bestVideo)
+            return listOf(bestVideo)
+        }
+
+        val isVideoDeviation = html.contains("\"isVideo\":true") ||
+            html.contains("\"type\":\"film\"") ||
+            html.contains("\"filetype\":\"video\"") ||
+            doc.selectFirst("video") != null
+
+        if (isVideoDeviation) {
+            val isMatureBlocked = html.contains("mature_loggedout") ||
+                html.contains("mature_filter") ||
+                html.contains("\"isBlocked\":true")
+            if (isMatureBlocked) {
+                throw IOException("This video deviation is age-restricted (mature). Please log in to DeviantArt in the extension WebView to view/play it.")
             }
         }
 
@@ -1191,39 +1266,58 @@ class DeviantArtApi(
             .replace("\\/", "/")
             .replace("\\\"", "\"")
 
-        if (!devId.isNullOrBlank()) {
-            val m = Regex(""""deviationId"\s*:\s*$devId""").find(unescaped)
-            if (m != null) {
-                val idx = m.range.first
-                val snippet = unescaped.substring(idx, (idx + 8000).coerceAtMost(unescaped.length))
-                val isFilm = Regex(""""(?:type|filetype)"\s*:\s*"(?:film|video)"|"(?:isVideo|isMovie)"\s*:\s*true|"video"|VideoQualities""", RegexOption.IGNORE_CASE).containsMatchIn(snippet)
-                if (isFilm) {
-                    val directVideos = Regex("""https?://[^\s"\'<>]+\.mp4[^\s"\'<>]*""", RegexOption.IGNORE_CASE)
-                        .findAll(snippet)
-                        .map { it.value }
-                        .distinct()
-                        .toList()
-                    if (directVideos.isNotEmpty()) {
-                        return directVideos
+        val result = mutableListOf<String>()
+
+        // 1. Check InitialState JSON entity media.types if present
+        try {
+            val root = extractInitialStateJson(html)
+            val devObj = devId?.let { root?.get("@@entities")?.jsonObject?.get("deviation")?.jsonObject?.get(it)?.jsonObject }
+            val mediaObj = devObj?.get("media") as? JsonObject
+            val types = mediaObj?.get("types")?.jsonArray?.mapNotNull { it as? JsonObject }.orEmpty()
+            for (t in types) {
+                val tName = t["t"]?.jsonPrimitive?.contentOrNull
+                val b = t["b"]?.jsonPrimitive?.contentOrNull
+                val c = t["c"]?.jsonPrimitive?.contentOrNull
+                if (tName == "video" || b?.contains(".mp4", ignoreCase = true) == true || c?.contains(".mp4", ignoreCase = true) == true) {
+                    val url = b ?: c
+                    if (!url.isNullOrBlank() && url.contains(".mp4", ignoreCase = true)) {
+                        result.add(url)
                     }
                 }
             }
-        }
+        } catch (_: Exception) {}
 
-        // HTML5 <video> / <source> tags
-        val doc = Jsoup.parse(html)
-        val html5Videos = mutableListOf<String>()
-        for (video in doc.select("video")) {
-            video.absUrl("src").takeIf { it.isNotBlank() && it.contains(".mp4", ignoreCase = true) }?.let { html5Videos.add(it) }
-            for (source in video.select("source")) {
-                source.absUrl("src").takeIf { it.isNotBlank() && it.contains(".mp4", ignoreCase = true) }?.let { html5Videos.add(it) }
+        // 2. Direct regex search for MP4 in deviation snippet
+        if (!devId.isNullOrBlank()) {
+            val devIdMarkers = listOf(""""deviationId":$devId""", """"deviationId":"$devId"""", devId)
+            for (marker in devIdMarkers) {
+                var pos = unescaped.indexOf(marker)
+                while (pos != -1) {
+                    val start = (pos - 2000).coerceAtLeast(0)
+                    val end = (pos + 35000).coerceAtMost(unescaped.length)
+                    val snippet = unescaped.substring(start, end)
+                    val directVideos = Regex("""https?://[^\s"\'<>]+\.mp4[^\s"\'<>]*""", RegexOption.IGNORE_CASE)
+                        .findAll(snippet)
+                        .map { it.value }
+                        .toList()
+                    result.addAll(directVideos)
+                    if (result.isNotEmpty()) break
+                    pos = unescaped.indexOf(marker, pos + 1)
+                }
+                if (result.isNotEmpty()) break
             }
         }
-        if (html5Videos.isNotEmpty()) {
-            return html5Videos.distinct()
+
+        // 3. HTML5 <video> / <source> tags
+        val doc = Jsoup.parse(html)
+        for (video in doc.select("video")) {
+            video.absUrl("src").takeIf { it.isNotBlank() && it.contains(".mp4", ignoreCase = true) }?.let { result.add(it) }
+            for (source in video.select("source")) {
+                source.absUrl("src").takeIf { it.isNotBlank() && it.contains(".mp4", ignoreCase = true) }?.let { result.add(it) }
+            }
         }
 
-        return emptyList()
+        return result.distinct()
     }
 
     /**

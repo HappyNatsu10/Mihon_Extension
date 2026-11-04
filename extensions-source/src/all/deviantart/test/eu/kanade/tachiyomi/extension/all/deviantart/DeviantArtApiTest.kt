@@ -238,7 +238,46 @@ class DeviantArtApiTest {
         }
         org.junit.Assert.assertTrue(premiumFolderLocked)
 
-        // 3. Purchasable for download/print BUT has public fullview preview -> NOT paywalled!
+        // 3. Subscriber paywall: isTier = true or tierId
+        val tierSubscriberLocked = json.parseToJsonElement("""{"isTier": true, "tierId": "tier_99"}""").let {
+            api.isPaywalled(it as kotlinx.serialization.json.JsonObject)
+        }
+        org.junit.Assert.assertTrue(tierSubscriberLocked)
+
+        // 4. Subscriber paywall: hasTierAccess = false
+        val noTierAccess = json.parseToJsonElement("""{"hasTierAccess": false}""").let {
+            api.isPaywalled(it as kotlinx.serialization.json.JsonObject)
+        }
+        org.junit.Assert.assertTrue(noTierAccess)
+
+        // 5. Exclusive / Supporter-only / Early access
+        val exclusive = json.parseToJsonElement("""{"isExclusive": true}""").let {
+            api.isPaywalled(it as kotlinx.serialization.json.JsonObject)
+        }
+        org.junit.Assert.assertTrue(exclusive)
+
+        val supporterOnly = json.parseToJsonElement("""{"isSupporterOnly": true}""").let {
+            api.isPaywalled(it as kotlinx.serialization.json.JsonObject)
+        }
+        org.junit.Assert.assertTrue(supporterOnly)
+
+        val earlyAccess = json.parseToJsonElement("""{"isEarlyAccess": true}""").let {
+            api.isPaywalled(it as kotlinx.serialization.json.JsonObject)
+        }
+        org.junit.Assert.assertTrue(earlyAccess)
+
+        val subscriberAccess = json.parseToJsonElement("""{"access": "subscribers"}""").let {
+            api.isPaywalled(it as kotlinx.serialization.json.JsonObject)
+        }
+        org.junit.Assert.assertTrue(subscriberAccess)
+
+        // 6. Block reasons containing tier / sub / supporter
+        val blockReasonLocked = json.parseToJsonElement("""{"blockReasons": ["supporter_only_tier"]}""").let {
+            api.isPaywalled(it as kotlinx.serialization.json.JsonObject)
+        }
+        org.junit.Assert.assertTrue(blockReasonLocked)
+
+        // 7. Purchasable for download/print BUT has public fullview preview -> NOT paywalled!
         val purchasableWithFullview = json.parseToJsonElement("""
             {
                 "isPurchasable": true,

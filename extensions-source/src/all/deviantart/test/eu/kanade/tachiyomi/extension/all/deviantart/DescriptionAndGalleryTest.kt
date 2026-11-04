@@ -301,4 +301,58 @@ class DescriptionAndGalleryTest {
         assertEquals("🔒 Paid Artwork", paidChap.name)
         assertEquals("Paywalled", paidChap.scanlator)
     }
+
+    @Test
+    fun testTipTapDaDeviationAndMentionFormatting() {
+        val tiptapJson = """
+            {
+                "version": "1",
+                "document": {
+                    "type": "doc",
+                    "content": [
+                        {
+                            "type": "paragraph",
+                            "attrs": { "textAlign": "center" },
+                            "content": [
+                                { "type": "text", "text": "Artwork by " },
+                                {
+                                    "type": "da-mention",
+                                    "attrs": {
+                                        "user": {
+                                            "username": "BeaNat"
+                                        }
+                                    }
+                                }
+                            ]
+                        },
+                        {
+                            "type": "da-deviation",
+                            "attrs": {
+                                "deviation": {
+                                    "media": {
+                                        "baseUri": "https://images-wixmp.com/f/test/model.jpg",
+                                        "prettyName": "model_test",
+                                        "token": ["dl_token_123"],
+                                        "types": [
+                                            { "t": "preview", "c": "/v1/fill/w_692,h_1154/test-pre.jpg" },
+                                            { "t": "fullview", "c": "/v1/fill/w_1152,h_1920/test-full.jpg" }
+                                        ]
+                                    }
+                                },
+                                "alignment": "center"
+                            }
+                        },
+                        {
+                            "type": "horizontalRule"
+                        }
+                    ]
+                }
+            }
+        """.trimIndent()
+
+        val cleaned = cleanDescriptionHtml(tiptapJson)
+        assertTrue(cleaned.contains("<font color=\"#0570e6\"><u>@BeaNat</u></font>"))
+        assertTrue(cleaned.contains("<img src=\"https://images-wixmp.com/f/test/model.jpg?token=dl_token_123\""))
+        assertTrue(cleaned.contains("<hr>"))
+    }
 }
