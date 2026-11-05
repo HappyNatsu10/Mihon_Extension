@@ -236,8 +236,13 @@ abstract class DeviantArt :
             var updatedManga = manga
             var updatedChapters = chapters
 
-            if (fetchDetails) {
-                val details = api.fetchArtworkDetails(manga.url)
+            val details = if (fetchDetails || fetchChapters) {
+                api.fetchArtworkDetails(manga.url)
+            } else {
+                null
+            }
+
+            if (fetchDetails && details != null) {
                 val cleanTitle = details.title.ifBlank { manga.title }.removePrefix("🔒 ")
                 updatedManga = manga.apply {
                     title = if (details.isPaywalled) "🔒 $cleanTitle" else cleanTitle
@@ -252,13 +257,18 @@ abstract class DeviantArt :
             }
 
             if (fetchChapters) {
-                val isPaywalled = updatedManga.genre?.contains("Paywalled") == true || updatedManga.title.startsWith("🔒 ")
+                val isPaywalled = updatedManga.genre?.contains("Paywalled") == true ||
+                    updatedManga.title.startsWith("🔒 ") ||
+                    details?.isPaywalled == true
+                val pubMs = details?.publishedMs?.takeIf { it > 0L }
+                    ?: chapters.firstOrNull()?.date_upload?.takeIf { it > 0L }
+                    ?: 0L
                 updatedChapters = listOf(
                     SChapter.create().apply {
                         url = manga.url
                         name = updatedManga.title.ifBlank { "Artwork" }
                         chapter_number = 1f
-                        date_upload = 0L
+                        date_upload = pubMs
                         scanlator = if (isPaywalled) "Paywalled" else null
                     },
                 )
@@ -417,7 +427,10 @@ abstract class DeviantArt :
     }
 
     override fun imageRequest(page: Page): Request = super.imageRequest(page).newBuilder()
+        .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
         .header("Referer", "$baseUrl/")
+        .header("Cookie", "agegate_state=1; view_adult=1; mature_filter=0")
+        .header("Accept", "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8")
         .build()
 
     // ============================== Filters ====================================
@@ -592,17 +605,18 @@ internal fun mergeWithExisting(
 
     for (item in crawled) {
         val key = chapterKey(item.path)
-        if (item.isPaywalled) {
+        val isPaywalled = item.isPaywalled || isPaywalledTitle(item.title)
+        if (isPaywalled) {
             paywalledKeys.add(key)
         }
-        if (hidePaywalled && item.isPaywalled) continue
+        if (hidePaywalled && isPaywalled) continue
         crawledOrder.add(key)
         val cleanTitle = item.title.removePrefix("🔒 ")
         byKey[key] = chapterFactory().apply {
             url = item.path
-            name = if (item.isPaywalled) "🔒 $cleanTitle" else cleanTitle
+            name = if (isPaywalled) "🔒 $cleanTitle" else cleanTitle
             date_upload = item.publishedMs
-            scanlator = if (item.isPaywalled) "Paywalled" else null
+            scanlator = if (isPaywalled) "Paywalled" else null
         }
     }
     for (old in existing) {
@@ -613,7 +627,9 @@ internal fun mergeWithExisting(
             fresh?.scanlator == "Paywalled" ||
             old.scanlator == "Paywalled" ||
             old.name.startsWith("🔒 ") ||
-            fresh?.name?.startsWith("🔒 ") == true
+            fresh?.name?.startsWith("🔒 ") == true ||
+            isPaywalledTitle(old.name) ||
+            (fresh != null && isPaywalledTitle(fresh.name))
 
         if (hidePaywalled && isPaywalled) {
             byKey.remove(key)

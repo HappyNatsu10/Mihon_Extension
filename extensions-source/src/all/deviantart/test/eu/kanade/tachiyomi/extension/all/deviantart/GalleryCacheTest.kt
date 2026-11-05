@@ -54,18 +54,18 @@ class GalleryCacheTest {
     }
 
     @Test
-    fun testSchemaVersion3Required() {
+    fun testSchemaVersion4Required() {
         val tempDir = java.nio.file.Files.createTempDirectory("da_cache_test").toFile()
         try {
             GalleryCache.customStorageDir = tempDir
-            // Save cache with schemaVersion = 2
-            val oldCache = GalleryCacheData(schemaVersion = 2, complete = true, items = listOf(CachedItem("1", "Old", "/art/old", 100L)))
+            // Save cache with schemaVersion = 3
+            val oldCache = GalleryCacheData(schemaVersion = 3, complete = true, items = listOf(CachedItem("1", "Old", "/art/old", 100L)))
             GalleryCache.saveCache("testuser", "all", false, oldCache)
 
             val loaded = GalleryCache.loadCache("testuser", "all", false)
-            assertEquals(2, loaded?.schemaVersion)
-            // schemaVersion >= 3 check
-            assertTrue(loaded?.schemaVersion != null && loaded.schemaVersion < 3)
+            assertEquals(3, loaded?.schemaVersion)
+            // schemaVersion >= 4 check
+            assertTrue(loaded?.schemaVersion != null && loaded.schemaVersion < 4)
         } finally {
             GalleryCache.customStorageDir = null
             tempDir.deleteRecursively()

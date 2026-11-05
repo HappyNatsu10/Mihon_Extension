@@ -40,6 +40,14 @@ class DeviantArtApi(
         DateTimeFormatter.ofPattern("EEE, dd MMM yyyy HH:mm:ss z", Locale.ENGLISH)
     }
 
+    fun browserRequestBuilder(url: String): Request.Builder = Request.Builder()
+        .url(url)
+        .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
+        .header("Referer", "$WEB_BASE_URL/")
+        .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8")
+        .header("Accept-Language", "en-US,en;q=0.9")
+        .header("Cookie", "agegate_state=1; view_adult=1; mature_filter=0")
+
     /**
      * Resolves author name via oEmbed for non-user URLs.
      */
@@ -111,7 +119,7 @@ class DeviantArtApi(
 
         return try {
             val response = HttpGuard.executeWithRetry("artwork metadata", debugLog) {
-                client.newCall(Request.Builder().url(fullUrl).build()).execute()
+                client.newCall(browserRequestBuilder(fullUrl).build()).execute()
             }
             val html = response.body.string()
             val doc = Jsoup.parse(html, fullUrl)
@@ -130,7 +138,8 @@ class DeviantArtApi(
             val devId = trailingIdRegex.find(path)?.groupValues?.get(1) ?: path.substringAfterLast("-").substringAfterLast("/")
             val devObj = root?.get("@@entities")?.jsonObject?.get("deviation")?.jsonObject?.get(devId)?.jsonObject
             val paywalled = devObj?.let { isPaywalled(it) } ?: (
-                html.contains("\"isLocked\":true") ||
+                isPaywalledTitle(title) ||
+                    html.contains("\"isLocked\":true") ||
                     html.contains("\"isPaidContent\":true") ||
                     html.contains("\"isTier\":true") ||
                     html.contains("\"tierId\":") ||
@@ -140,12 +149,23 @@ class DeviantArtApi(
                     html.contains("\"isSupporterOnly\":true")
                 )
 
+            val publishedTimeStr = devObj?.get("publishedTime")?.jsonPrimitive?.contentOrNull
+                ?: doc.selectFirst("meta[property=article:published_time]")?.attr("content")
+                ?: doc.selectFirst("time")?.attr("datetime")
+                ?: doc.selectFirst("time")?.text()
+            val publishedMs = if (!publishedTimeStr.isNullOrBlank()) {
+                parseDate(publishedTimeStr)
+            } else {
+                0L
+            }
+
             ArtworkDetails(
                 title = title,
                 author = author,
                 description = desc,
                 thumbnailUrl = thumb,
                 isPaywalled = paywalled,
+                publishedMs = publishedMs,
             )
         } catch (_: Exception) {
             ArtworkDetails(
@@ -153,7 +173,8 @@ class DeviantArtApi(
                 author = defaultAuthor,
                 description = null,
                 thumbnailUrl = predictAvatarUrl(defaultAuthor),
-                isPaywalled = false,
+                isPaywalled = isPaywalledTitle(defaultTitle),
+                publishedMs = 0L,
             )
         }
     }
@@ -508,6 +529,7 @@ class DeviantArtApi(
                 ?: link.substringAfterLast("-").substringAfterLast("/")
 
             val relativePath = link.removePrefix(WEB_BASE_URL)
+            val paywalled = isPaywalledTitle(title)
 
             result.add(
                 CachedItem(
@@ -515,6 +537,7 @@ class DeviantArtApi(
                     title = title,
                     path = relativePath,
                     publishedMs = dateUpload,
+                    isPaywalled = paywalled,
                 ),
             )
         }
@@ -629,14 +652,21 @@ class DeviantArtApi(
     }
 
     fun isPaywalled(dev: JsonObject): Boolean {
+        // 0. Title check
+        val title = dev["title"]?.jsonPrimitive?.contentOrNull
+        if (title != null && isPaywalledTitle(title)) return true
+
         // 1. Explicit lock or paid flags
         if (dev["isLocked"]?.jsonPrimitive?.booleanOrNull == true) return true
         if (dev["isPaidContent"]?.jsonPrimitive?.booleanOrNull == true) return true
+        if (dev["isPremium"]?.jsonPrimitive?.booleanOrNull == true) return true
+        if (dev["premium"]?.jsonPrimitive?.booleanOrNull == true) return true
 
         // 2. Subscription tier flags
         if (dev["isTier"]?.jsonPrimitive?.booleanOrNull == true) return true
         if (dev["hasTierAccess"]?.jsonPrimitive?.booleanOrNull == false) return true
         if (dev["tierId"]?.jsonPrimitive?.contentOrNull?.isNotBlank() == true) return true
+        if (dev["tierName"]?.jsonPrimitive?.contentOrNull?.isNotBlank() == true) return true
         val tier = dev["tier"]
         if (tier != null && tier !is kotlinx.serialization.json.JsonNull) {
             if (tier !is kotlinx.serialization.json.JsonPrimitive || tier.content.isNotBlank()) return true
@@ -665,12 +695,18 @@ class DeviantArtApi(
             if (monetization["tierId"]?.jsonPrimitive?.contentOrNull?.isNotBlank() == true) return true
             if (monetization["hasTierAccess"]?.jsonPrimitive?.booleanOrNull == false) return true
             val mType = monetization["type"]?.jsonPrimitive?.contentOrNull?.lowercase()
-            if (mType in listOf("tier", "subscription", "exclusive")) return true
+            if (mType in listOf("tier", "subscription", "exclusive", "premium")) return true
         }
 
-        // 7. Premium folder
+        // 7. Premium folder & PCP pricing
         val premiumFolder = dev["premiumFolderData"]
         if (premiumFolder != null && premiumFolder !is kotlinx.serialization.json.JsonNull) return true
+        val pcp = dev["pcp"] as? JsonObject
+        if (pcp != null) {
+            val dlPrice = pcp["downloadPrice"]?.jsonPrimitive?.intOrNull ?: 0
+            val pointPrice = pcp["pointPrice"]?.jsonPrimitive?.intOrNull ?: 0
+            if (dlPrice > 0 || pointPrice > 0) return true
+        }
 
         // 8. Block reasons
         val blockReasons = dev["blockReasons"]?.jsonArray?.mapNotNull { it.jsonPrimitive.contentOrNull }.orEmpty()
@@ -681,7 +717,8 @@ class DeviantArtApi(
                     r.contains("lock", ignoreCase = true) ||
                     r.contains("exclusive", ignoreCase = true) ||
                     r.contains("supporter", ignoreCase = true) ||
-                    r.contains("early_access", ignoreCase = true)
+                    r.contains("early_access", ignoreCase = true) ||
+                    r.contains("premium", ignoreCase = true)
             }
         ) {
             return true
@@ -1135,33 +1172,47 @@ class DeviantArtApi(
             }
 
         // Description extraction priority:
-        // 1. Try extracting rich description or literature body from window.__INITIAL_STATE__
-        var rawText = ""
-        try {
-            val root = extractInitialStateJson(html)
-            val devExt = root?.get("@@entities")?.jsonObject?.get("deviationExtended")?.jsonObject?.get(devId)?.jsonObject
-                ?: root?.get("@@entities")?.jsonObject?.get("deviation")?.jsonObject?.get(devId)?.jsonObject?.get("extended")?.jsonObject
-            val devObj = root?.get("@@entities")?.jsonObject?.get("deviation")?.jsonObject?.get(devId)?.jsonObject
+        // 1. First, check pre-rendered DOM elements (SSR HTML) which contain the full, un-truncated story/description
+        val descEl = doc.selectFirst("div[data-editor-viewer]")
+            ?: doc.selectFirst("#description [data-editor-viewer]")
+            ?: doc.selectFirst("#description")
+            ?: doc.selectFirst(".legacy-journal")
+            ?: doc.selectFirst("[data-hook=art_stage] + div")
+        val domHtml = descEl?.html().orEmpty()
+        var rawText = if (domHtml.isNotBlank() && domHtml.length > 20 && domHtml != "{\\" && !domHtml.startsWith("{\\")) {
+            cleanDescriptionHtml(domHtml)
+        } else {
+            ""
+        }
 
-            val candidate = devExt?.get("descriptionText")?.jsonObject?.get("html")?.jsonObject?.get("markup")?.jsonPrimitive?.contentOrNull
-                ?: devExt?.get("bodyText")?.jsonObject?.get("html")?.jsonObject?.get("markup")?.jsonPrimitive?.contentOrNull
-                ?: devExt?.get("body")?.jsonObject?.get("markup")?.jsonPrimitive?.contentOrNull
-                ?: devExt?.get("description")?.jsonObject?.get("markup")?.jsonPrimitive?.contentOrNull
-                ?: devExt?.get("description")?.jsonObject?.get("draft")?.jsonPrimitive?.contentOrNull
-                ?: devExt?.get("description")?.jsonObject?.get("html")?.jsonObject?.get("markup")?.jsonPrimitive?.contentOrNull
-                ?: devExt?.get("bodyText")?.jsonObject?.get("html")?.jsonPrimitive?.contentOrNull
-                ?: devExt?.get("descriptionText")?.jsonObject?.get("html")?.jsonPrimitive?.contentOrNull
-                ?: devExt?.get("descriptionText")?.jsonObject?.get("excerpt")?.jsonPrimitive?.contentOrNull
-                ?: devObj?.get("descriptionText")?.jsonObject?.get("html")?.jsonObject?.get("markup")?.jsonPrimitive?.contentOrNull
-                ?: devObj?.get("descriptionText")?.jsonObject?.get("html")?.jsonPrimitive?.contentOrNull
-                ?: devObj?.get("description")?.jsonObject?.get("markup")?.jsonPrimitive?.contentOrNull
-                ?: devObj?.get("description")?.jsonObject?.get("html")?.jsonObject?.get("markup")?.jsonPrimitive?.contentOrNull
-                ?: devObj?.get("descriptionText")?.jsonObject?.get("excerpt")?.jsonPrimitive?.contentOrNull
+        // 2. Try extracting rich description or literature body from window.__INITIAL_STATE__
+        if (rawText.isBlank()) {
+            try {
+                val root = extractInitialStateJson(html)
+                val devExt = root?.get("@@entities")?.jsonObject?.get("deviationExtended")?.jsonObject?.get(devId)?.jsonObject
+                    ?: root?.get("@@entities")?.jsonObject?.get("deviation")?.jsonObject?.get(devId)?.jsonObject?.get("extended")?.jsonObject
+                val devObj = root?.get("@@entities")?.jsonObject?.get("deviation")?.jsonObject?.get(devId)?.jsonObject
 
-            if (!candidate.isNullOrBlank()) {
-                rawText = cleanDescriptionHtml(candidate)
-            }
-        } catch (_: Exception) {}
+                val candidate = devExt?.get("descriptionText")?.jsonObject?.get("html")?.jsonObject?.get("markup")?.jsonPrimitive?.contentOrNull
+                    ?: devExt?.get("bodyText")?.jsonObject?.get("html")?.jsonObject?.get("markup")?.jsonPrimitive?.contentOrNull
+                    ?: devExt?.get("body")?.jsonObject?.get("markup")?.jsonPrimitive?.contentOrNull
+                    ?: devExt?.get("description")?.jsonObject?.get("markup")?.jsonPrimitive?.contentOrNull
+                    ?: devExt?.get("description")?.jsonObject?.get("draft")?.jsonPrimitive?.contentOrNull
+                    ?: devExt?.get("description")?.jsonObject?.get("html")?.jsonObject?.get("markup")?.jsonPrimitive?.contentOrNull
+                    ?: devExt?.get("bodyText")?.jsonObject?.get("html")?.jsonPrimitive?.contentOrNull
+                    ?: devExt?.get("descriptionText")?.jsonObject?.get("html")?.jsonPrimitive?.contentOrNull
+                    ?: devObj?.get("descriptionText")?.jsonObject?.get("html")?.jsonObject?.get("markup")?.jsonPrimitive?.contentOrNull
+                    ?: devObj?.get("descriptionText")?.jsonObject?.get("html")?.jsonPrimitive?.contentOrNull
+                    ?: devObj?.get("description")?.jsonObject?.get("markup")?.jsonPrimitive?.contentOrNull
+                    ?: devObj?.get("description")?.jsonObject?.get("html")?.jsonObject?.get("markup")?.jsonPrimitive?.contentOrNull
+                    ?: devExt?.get("descriptionText")?.jsonObject?.get("excerpt")?.jsonPrimitive?.contentOrNull
+                    ?: devObj?.get("descriptionText")?.jsonObject?.get("excerpt")?.jsonPrimitive?.contentOrNull
+
+                if (!candidate.isNullOrBlank()) {
+                    rawText = cleanDescriptionHtml(candidate)
+                }
+            } catch (_: Exception) {}
+        }
 
         // 2. Direct regex search in HTML for description or body markup
         if (rawText.isBlank()) {
@@ -1241,11 +1292,25 @@ class DeviantArtApi(
         // 1. Scrape deviation webpage
         val response = try {
             HttpGuard.executeWithRetry("artwork fetch", debugLog) {
-                client.newCall(Request.Builder().url(fullUrl).build()).execute()
+                client.newCall(browserRequestBuilder(fullUrl).build()).execute()
             }
         } catch (e: Exception) {
-            resolveOembedImage(fullUrl)?.takeIf { isArtworkUrl(it) }?.let { return listOf(it) }
-            throw e
+            val fallbackResp = if (devId.isNotBlank() && !fullUrl.endsWith("/deviation/$devId")) {
+                try {
+                    HttpGuard.executeWithRetry("artwork fallback fetch", debugLog) {
+                        client.newCall(browserRequestBuilder("$WEB_BASE_URL/deviation/$devId").build()).execute()
+                    }
+                } catch (_: Exception) {
+                    null
+                }
+            } else {
+                null
+            }
+
+            fallbackResp ?: run {
+                resolveOembedImage(fullUrl)?.takeIf { isArtworkUrl(it) }?.let { return listOf(it) }
+                throw e
+            }
         }
 
         val html = response.body.string()
@@ -1255,12 +1320,6 @@ class DeviantArtApi(
         extractAndStoreDescription(devId, doc, html, relativeUrl)
 
         // 3. Check for video deviation (Wix MP4 qualities or HTML5 video)
-        val videoUrls = extractVideoUrls(html, devId)
-        val bestVideo = pickBestVideoUrl(videoUrls, qualityMode)
-        if (bestVideo != null) {
-            return listOf(bestVideo)
-        }
-
         val isVideoDeviation = html.contains("\"isVideo\":true") ||
             html.contains("\"type\":\"film\"") ||
             html.contains("\"filetype\":\"video\"") ||
@@ -1272,6 +1331,21 @@ class DeviantArtApi(
                 html.contains("\"isBlocked\":true")
             if (isMatureBlocked) {
                 throw IOException("This video deviation is age-restricted (mature). Please log in to DeviantArt in the extension WebView to view/play it.")
+            }
+            // In Mihon / manga readers, MP4 video streams crash the image decoder with 'Failed to initialize decoder'.
+            // Extract the high-resolution artwork poster/preview image so the reader can display it.
+            val (videoMedia, _) = extractDeviationMediaFromHtml(html, devId)
+            val posterUrl = videoMedia?.let { fullviewUrl(it, raiseQuality = true) }
+                ?: doc.selectFirst("meta[property=og:image]")?.attr("content")?.takeIf { isArtworkUrl(it) }
+                ?: resolveOembedImage(fullUrl)?.takeIf { isArtworkUrl(it) }
+
+            if (posterUrl != null) {
+                return listOf(posterUrl)
+            }
+            val videoUrls = extractVideoUrls(html, devId)
+            val bestVideo = pickBestVideoUrl(videoUrls, qualityMode)
+            if (bestVideo != null) {
+                return listOf(bestVideo)
             }
             throw IOException("This video deviation could not be loaded or requires login.")
         }

@@ -438,4 +438,76 @@ class DescriptionAndGalleryTest {
             ?: candidate
         assertEquals(latestArtwork, fallbackThumb)
     }
+
+    @Test
+    fun testIsPaywalledTitle() {
+        assertTrue(isPaywalledTitle("[Subscriber] The Story Part 1"))
+        assertTrue(isPaywalledTitle("(Subscribers Only) Exclusive Content"))
+        assertTrue(isPaywalledTitle("[Subscription] New chapter"))
+        assertTrue(isPaywalledTitle("[Tier 1] Artwork"))
+        assertTrue(isPaywalledTitle("(Tier 3) High-res"))
+        assertTrue(isPaywalledTitle("🔒 Locked chapter"))
+        assertTrue(isPaywalledTitle("[Exclusive] Content"))
+        assertTrue(isPaywalledTitle("Supporters Only - Draft"))
+        assertFalse(isPaywalledTitle("Normal Free Chapter 1"))
+    }
+
+    @Test
+    fun testTipTapWithExcerptNotTruncated() {
+        val json = """
+            {
+                "type": "doc",
+                "excerpt": "Short excerpt here",
+                "content": [
+                    {
+                        "type": "paragraph",
+                        "content": [
+                            {"type": "text", "text": "This is the full rich story paragraph 1."},
+                            {"type": "text", "text": " And part 2."}
+                        ]
+                    },
+                    {
+                        "type": "paragraph",
+                        "content": [
+                            {"type": "text", "text": "This is paragraph 2 of the story."}
+                        ]
+                    }
+                ]
+            }
+        """.trimIndent()
+
+        val parsed = extractTextOrHtmlFromDraftOrTiptap(json)
+        assertTrue(parsed.contains("This is the full rich story paragraph 1."))
+        assertTrue(parsed.contains("This is paragraph 2 of the story."))
+        assertFalse(parsed == "Short excerpt here")
+    }
+
+    @Test
+    fun testMergeWithExistingTitlePaywallFiltersOldLibraryChapters() {
+        val crawled = listOf(
+            CachedItem(id = "1", title = "Free Artwork", path = "/art/free-1", publishedMs = 1000L, isPaywalled = false),
+        )
+        // Existing chapters from previous saves where scanlator was null and name was "[Subscriber] Paid Art"
+        val existing = listOf(
+            TestChapter().apply {
+                url = "/art/free-1"
+                name = "Free Artwork"
+                scanlator = null
+            },
+            TestChapter().apply {
+                url = "/art/sub-2"
+                name = "[Subscriber] Paid Art"
+                scanlator = null
+            },
+            TestChapter().apply {
+                url = "/art/tier-3"
+                name = "(Tier 2) Locked Art"
+                scanlator = null
+            },
+        )
+
+        val filtered = mergeWithExisting(crawled, existing, sortById = false, hidePaywalled = true) { TestChapter() }
+        assertEquals(1, filtered.size)
+        assertEquals("/art/free-1", filtered[0].url)
+    }
 }

@@ -73,6 +73,29 @@ fun resolveMediaDimensions(mediaObj: JsonObject): Pair<Int, Int>? {
     return if (w != null && h != null && w > 0 && h > 0) Pair(w, h) else null
 }
 
+fun isPaywalledTitle(title: String): Boolean {
+    val t = title.lowercase()
+    return t.startsWith("🔒") ||
+        t.contains("[subscriber") ||
+        t.contains("(subscriber") ||
+        t.contains("[subscription") ||
+        t.contains("(subscription") ||
+        t.contains("subscribers only") ||
+        t.contains("subscriber only") ||
+        t.contains("subscriber-only") ||
+        t.contains("[tier") ||
+        t.contains("(tier") ||
+        t.contains("tier only") ||
+        t.contains("tier-only") ||
+        t.contains("[exclusive]") ||
+        t.contains("(exclusive)") ||
+        t.contains("[premium]") ||
+        t.contains("(premium)") ||
+        t.contains("premium content") ||
+        t.contains("supporters only") ||
+        t.contains("supporter only")
+}
+
 /**
  * Resolves high-resolution image URL from a DeviantArt media JSON object (including Wix CDN file.download tokens).
  */
@@ -142,10 +165,10 @@ fun extractTextOrHtmlFromDraftOrTiptap(raw: String): String {
     if (!s.startsWith("{") && !s.startsWith("{\\")) return raw
     if (s.length < 10) return "" // Discard corrupt stubs like "{\" or "{\\"
 
-    // 1. Check for 'excerpt' in JSON structure (only if no full rich document or blocks AST)
+    // 1. Check for 'excerpt' in JSON structure (only if no full rich document, blocks, or content AST)
     val excerptRegex = Regex(""""excerpt"\s*:\s*"((?:\\.|[^"\\])*)"""")
     val excerptMatch = excerptRegex.find(s)
-    if (excerptMatch != null && !s.contains("\"document\"") && !s.contains("\"blocks\"")) {
+    if (excerptMatch != null && !s.contains("\"document\"") && !s.contains("\"blocks\"") && !s.contains("\"content\"") && !s.contains("\"type\":\"doc\"")) {
         val excerpt = excerptMatch.groupValues[1]
             .replace("\\n", "\n")
             .replace("\\\"", "\"")
@@ -396,14 +419,19 @@ fun cleanDescriptionHtml(html: String): String {
     if (html.isBlank()) return ""
     var content = html.trim()
     if (content == "{\\" || content.startsWith("{\\") ||
-        (content.startsWith("{") && (content.contains("\"type\"") || content.contains("\"version\"") || content.contains("\"excerpt\"") || content.contains("\"blocks\"") || content.contains("\"document\"")))
+        (content.startsWith("{") && (content.contains("\"type\"") || content.contains("\"version\"") || content.contains("\"excerpt\"") || content.contains("\"blocks\"") || content.contains("\"document\"") || content.contains("\"content\"")))
     ) {
         content = extractTextOrHtmlFromDraftOrTiptap(content)
         if (content.isBlank() || content == "{\\" || content.startsWith("{\\")) return ""
     }
 
     val doc = Jsoup.parseBodyFragment(content)
-    doc.select("script, style, h2").remove()
+    doc.select("script, style").remove()
+    doc.select("h2").forEach { h2 ->
+        if (h2.text().trim().equals("Description", ignoreCase = true)) {
+            h2.remove()
+        }
+    }
 
     // Normalize image sources from lazy-loading attributes
     for (img in doc.select("img")) {

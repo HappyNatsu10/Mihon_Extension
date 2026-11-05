@@ -17,6 +17,7 @@ data class ArtworkDetails(
     val description: String? = null,
     val thumbnailUrl: String? = null,
     val isPaywalled: Boolean = false,
+    val publishedMs: Long = 0L,
 )
 
 data class ArtistProfile(
@@ -39,7 +40,7 @@ data class CachedItem(
 
 @Serializable
 data class GalleryCacheData(
-    val schemaVersion: Int = 2,
+    val schemaVersion: Int = 4,
     val complete: Boolean,
     val items: List<CachedItem>,
     val nextOffset: Int? = null,
