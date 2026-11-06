@@ -147,5 +147,5 @@ object ImageSelector {
         return if (modified) result else null
     }
 
-    fun maximizeRendition(url: String): String = upgradeRendition(url) ?: url
+    fun maximizeRendition(url: String): String = cleanWixUrl(upgradeRendition(url) ?: url)
 }

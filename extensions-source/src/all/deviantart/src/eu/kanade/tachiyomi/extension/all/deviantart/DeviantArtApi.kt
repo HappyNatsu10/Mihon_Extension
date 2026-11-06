@@ -562,7 +562,9 @@ class DeviantArtApi(
 
     fun updateCsrfFromHtml(html: String) {
         val t = Regex("""__CSRF_TOKEN__\s*=\s*'([^']+)'""").find(html)?.groupValues?.get(1)
+            ?: Regex("""window\.__CSRF_TOKEN__\s*=\s*"([^"]+)"""").find(html)?.groupValues?.get(1)
             ?: Regex(""""csrf_token"\s*:\s*"([^"]+)"""").find(html)?.groupValues?.get(1)
+            ?: Regex(""""csrfToken"\s*:\s*"([^"]+)"""").find(html)?.groupValues?.get(1)
         if (t != null && t.isNotBlank()) {
             csrf = t
         }
@@ -781,7 +783,7 @@ class DeviantArtApi(
         if (raiseQuality && m.token.isNotEmpty()) {
             val dlToken = findDownloadToken(m.token)
             if (dlToken != null) {
-                return "$base?token=$dlToken"
+                return cleanWixUrl("$base?token=$dlToken")
             }
         }
 
@@ -792,13 +794,13 @@ class DeviantArtApi(
             ?: m.types.maxByOrNull { (it.w ?: 0) * (it.h ?: 0) }
             ?: m.types.firstOrNull { !it.c.isNullOrBlank() }
 
-        val path = fv?.c?.replace("<prettyName>", m.prettyName.orEmpty())
+        val path = fv?.c?.let { cleanWixUrl(it) }?.replace("<prettyName>", m.prettyName.orEmpty())
         var url = if (path != null) base + path else base
         if (raiseQuality) url = qualityRegex.replace(url, ",q_100")
         val token = m.token.firstOrNull()
         if (token != null) url = "$url?token=$token"
 
-        return if (raiseQuality) ImageSelector.maximizeRendition(url) else url
+        return if (raiseQuality) ImageSelector.maximizeRendition(url) else cleanWixUrl(url)
     }
 
     /** Original file; only for isDownloadable artworks, usually needs login cookies. */
@@ -1124,12 +1126,12 @@ class DeviantArtApi(
 
     fun fetchArtworkDescription(relativeOrFullUrl: String): ArtworkDescription? {
         val fullUrl = if (relativeOrFullUrl.startsWith("http")) relativeOrFullUrl else "$WEB_BASE_URL$relativeOrFullUrl"
-        val devId = DEVIATION_ID_REGEX.find(relativeOrFullUrl)?.groupValues?.get(1)
-            ?: relativeOrFullUrl.substringAfterLast("-").substringAfterLast("/")
+        val devId = extractDeviationId(relativeOrFullUrl)
+        DescriptionStore.get(devId)?.let { return if (it.text.isBlank()) null else it }
 
         return try {
             val response = HttpGuard.executeWithRetry("artwork description", debugLog) {
-                client.newCall(Request.Builder().url(fullUrl).build()).execute()
+                client.newCall(browserRequestBuilder(fullUrl).build()).execute()
             }
             val html = response.body.string()
             val doc = Jsoup.parse(html, fullUrl)
@@ -1264,8 +1266,6 @@ class DeviantArtApi(
             }
         }
 
-        if (rawText.isBlank()) return null
-
         val desc = ArtworkDescription(
             deviationId = devId,
             title = title,
@@ -1274,7 +1274,7 @@ class DeviantArtApi(
             text = rawText,
         )
         DescriptionStore.put(devId, desc)
-        return desc
+        return if (rawText.isBlank()) null else desc
     }
 
     /**
@@ -1284,10 +1284,10 @@ class DeviantArtApi(
     fun fetchDeviationImages(
         relativeUrl: String,
         qualityMode: QualityMode = QualityMode.BEST_AVAILABLE,
+        videoMode: VideoMode = VideoMode.POSTER,
     ): List<String> {
         val fullUrl = if (relativeUrl.startsWith("http")) relativeUrl else "$WEB_BASE_URL$relativeUrl"
-        val devId = DEVIATION_ID_REGEX.find(relativeUrl)?.groupValues?.get(1)
-            ?: relativeUrl.substringAfterLast("-").substringAfterLast("/")
+        val devId = extractDeviationId(relativeUrl)
 
         // 1. Scrape deviation webpage
         val response = try {
@@ -1308,12 +1308,13 @@ class DeviantArtApi(
             }
 
             fallbackResp ?: run {
-                resolveOembedImage(fullUrl)?.takeIf { isArtworkUrl(it) }?.let { return listOf(it) }
+                resolveOembedImage(fullUrl)?.takeIf { isArtworkUrl(it) }?.let { return listOf(cleanWixUrl(it)) }
                 throw e
             }
         }
 
         val html = response.body.string()
+        updateCsrfFromHtml(html)
         val doc = Jsoup.parse(html, fullUrl)
 
         // 2. Extract and store description for DescriptionStore
@@ -1329,23 +1330,34 @@ class DeviantArtApi(
             val isMatureBlocked = html.contains("mature_loggedout") ||
                 html.contains("mature_filter") ||
                 html.contains("\"isBlocked\":true")
-            if (isMatureBlocked) {
-                throw IOException("This video deviation is age-restricted (mature). Please log in to DeviantArt in the extension WebView to view/play it.")
+
+            // In VIDEO_STREAM mode, prefer actual playable MP4 video if available (e.g. for Aniyomi player)
+            if (videoMode == VideoMode.VIDEO_STREAM) {
+                val videoUrls = extractVideoUrls(html, devId)
+                val bestVideo = pickBestVideoUrl(videoUrls, qualityMode)
+                if (bestVideo != null) {
+                    return listOf(bestVideo)
+                }
             }
-            // In Mihon / manga readers, MP4 video streams crash the image decoder with 'Failed to initialize decoder'.
-            // Extract the high-resolution artwork poster/preview image so the reader can display it.
+
+            // Extract high-resolution artwork poster/preview image (sanitizing blur filters that trigger 400 Bad Request)
             val (videoMedia, _) = extractDeviationMediaFromHtml(html, devId)
             val posterUrl = videoMedia?.let { fullviewUrl(it, raiseQuality = true) }
-                ?: doc.selectFirst("meta[property=og:image]")?.attr("content")?.takeIf { isArtworkUrl(it) }
-                ?: resolveOembedImage(fullUrl)?.takeIf { isArtworkUrl(it) }
+                ?: doc.selectFirst("meta[property=og:image]")?.attr("content")?.takeIf { isArtworkUrl(it) }?.let { cleanWixUrl(it) }
+                ?: resolveOembedImage(fullUrl)?.takeIf { isArtworkUrl(it) }?.let { cleanWixUrl(it) }
 
             if (posterUrl != null) {
-                return listOf(posterUrl)
+                return listOf(cleanWixUrl(posterUrl))
             }
+
             val videoUrls = extractVideoUrls(html, devId)
             val bestVideo = pickBestVideoUrl(videoUrls, qualityMode)
             if (bestVideo != null) {
                 return listOf(bestVideo)
+            }
+
+            if (isMatureBlocked) {
+                throw IOException("This video deviation is age-restricted (mature). Please log in to DeviantArt in the extension WebView to view/play it.")
             }
             throw IOException("This video deviation could not be loaded or requires login.")
         }
@@ -1358,8 +1370,10 @@ class DeviantArtApi(
         val (primaryMedia, htmlAdditional) = extractDeviationMediaFromHtml(html, devId)
         val additionalMedia = if (htmlAdditional.isNotEmpty()) {
             htmlAdditional
-        } else {
+        } else if (html.contains("\"isMultiMedia\":true") || html.contains("additionalMedia")) {
             fetchAdditionalMedia(devId)
+        } else {
+            emptyList()
         }
 
         val raiseQuality = (qualityMode == QualityMode.BEST_AVAILABLE)
@@ -1368,12 +1382,12 @@ class DeviantArtApi(
         // Primary artwork image: ALWAYS use fullviewUrl (which handles file.download tokens for lossless originals)
         // Never use https://www.deviantart.com/download/ which returns HTML error/redirect and crashes decoders
         if (primaryMedia != null) {
-            fullviewUrl(primaryMedia, raiseQuality)?.let { resultPages.add(it) }
+            fullviewUrl(primaryMedia, raiseQuality)?.let { resultPages.add(cleanWixUrl(it)) }
         }
 
         // Add additional genuine pages from stack in order
         for (extra in additionalMedia) {
-            fullviewUrl(extra, raiseQuality)?.let { resultPages.add(it) }
+            fullviewUrl(extra, raiseQuality)?.let { resultPages.add(cleanWixUrl(it)) }
         }
 
         if (resultPages.isNotEmpty()) {
@@ -1582,7 +1596,13 @@ class DeviantArtApi(
 
         private val NUMBER_OF_ITEMS_REGEX = Regex(""""numberOfItems"\s*:\s*(\d+)""")
         private val WORKS_OF_ART_REGEX = Regex("""(\d[\d,]*)\s+works of art""", RegexOption.IGNORE_CASE)
-        private val DEVIATION_ID_REGEX = Regex("""-(\d+)(?:[/?#].*)?$""")
+        val DEVIATION_ID_REGEX = Regex("""-(\d+)(?:[/?#].*)?$""")
         private val IMAGE_ORIGINAL_URL_REGEX = Regex("""/v1(/.*)?(?=\?)""")
+
+        fun extractDeviationId(url: String): String {
+            val clean = url.substringBefore("?").substringBefore("#").trimEnd('/')
+            return DEVIATION_ID_REGEX.find(clean)?.groupValues?.get(1)
+                ?: clean.substringAfterLast("-").substringAfterLast("/")
+        }
     }
 }

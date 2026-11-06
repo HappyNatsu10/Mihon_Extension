@@ -45,9 +45,8 @@ abstract class DeviantArt :
             maxPagesProvider = { preferences.descriptionMaxPages },
         ),
     )
-        .rateLimit(permits = 2, period = 1.seconds) { it.host == "backend.deviantart.com" }
-        .rateLimit(permits = 2, period = 1.seconds) { it.host == "www.deviantart.com" }
-        .rateLimit(permits = 10, period = 1.seconds) { it.host.endsWith("wixmp.com") }
+        .rateLimit(permits = 5, period = 1.seconds) { it.host == "backend.deviantart.com" }
+        .rateLimit(permits = 5, period = 1.seconds) { it.host == "www.deviantart.com" }
 
     override fun Headers.Builder.configureHeaders(): Headers.Builder = set("Referer", "$baseUrl/")
 
@@ -381,7 +380,7 @@ abstract class DeviantArt :
 
         // Default mode: One chapter per artwork. Fetch single deviation fresh with ImageSelector quality ranking (FR-5, FR-6, FR-16).
         val images = try {
-            api.fetchDeviationImages(chapterUrl, preferences.imageQuality)
+            api.fetchDeviationImages(chapterUrl, preferences.imageQuality, preferences.videoMode)
         } catch (e: Exception) {
             if (preferences.showDescription && (e.message.orEmpty().contains("literature", ignoreCase = true) || e.message.orEmpty().contains("text", ignoreCase = true))) {
                 emptyList()
@@ -394,8 +393,7 @@ abstract class DeviantArt :
             Page(index, url = chapterUrl, imageUrl = imgUrl)
         }.toMutableList()
 
-        val devId = trailingIdRegex.find(chapterUrl)?.groupValues?.get(1)
-            ?: chapterUrl.substringAfterLast("-").substringAfterLast("/")
+        val devId = DeviantArtApi.extractDeviationId(chapterUrl)
 
         val hasVideo = images.any { it.contains(".mp4", ignoreCase = true) }
         if (preferences.showDescription && devId.isNotBlank() && !hasVideo) {
@@ -484,6 +482,21 @@ abstract class DeviantArt :
         }
         screen.addPreference(imageQualityPref)
 
+        val videoModePref = ListPreference(screen.context).apply {
+            key = PREF_VIDEO_MODE_KEY
+            title = "Video deviation player mode"
+            entries = arrayOf(
+                "Artwork preview image (Mihon reader compatible - Default)",
+                "Direct video stream (MP4 - For Aniyomi / video player)",
+            )
+            entryValues = arrayOf(VideoMode.POSTER.name, VideoMode.VIDEO_STREAM.name)
+            summary = "Current: %s\n\n" +
+                "'Artwork preview image' serves high-resolution artwork posters to prevent decoder initialization errors in image readers.\n" +
+                "'Direct video stream' serves direct MP4 video streams when available for playback in Aniyomi or external video players."
+            setDefaultValue(VideoMode.POSTER.name)
+        }
+        screen.addPreference(videoModePref)
+
         val hidePaywalledPref = SwitchPreferenceCompat(screen.context).apply {
             key = PREF_HIDE_PAYWALLED_KEY
             title = "Hide paywalled deviations"
@@ -565,12 +578,23 @@ abstract class DeviantArt :
     private val SharedPreferences.showDescription: Boolean
         get() = getBoolean(PREF_SHOW_DESCRIPTION_KEY, true)
 
+    private val SharedPreferences.videoMode: VideoMode
+        get() {
+            val raw = getString(PREF_VIDEO_MODE_KEY, VideoMode.POSTER.name)
+            return try {
+                VideoMode.valueOf(raw!!)
+            } catch (_: Exception) {
+                VideoMode.POSTER
+            }
+        }
+
     private val SharedPreferences.descriptionMaxPages: Int
         get() = getString(PREF_DESCRIPTION_MAX_PAGES_KEY, "10")?.toIntOrNull()?.coerceIn(1, 100) ?: 10
 
     companion object {
         private const val PREF_CHAPTER_MODE_KEY = "chapter_mode"
         private const val PREF_IMAGE_QUALITY_KEY = "image_quality"
+        private const val PREF_VIDEO_MODE_KEY = "video_mode"
         private const val PREF_HIDE_PAYWALLED_KEY = "hide_paywalled"
         private const val PREF_DEBUG_LOG_KEY = "debug_log"
         private const val PREF_SHOW_DESCRIPTION_KEY = "show_description"

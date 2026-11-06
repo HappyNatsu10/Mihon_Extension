@@ -89,6 +89,11 @@ enum class QualityMode {
     STANDARD,
 }
 
+enum class VideoMode {
+    POSTER,
+    VIDEO_STREAM,
+}
+
 data class RssPageResult(
     val items: List<CachedItem>,
     val nextUrl: String? = null,

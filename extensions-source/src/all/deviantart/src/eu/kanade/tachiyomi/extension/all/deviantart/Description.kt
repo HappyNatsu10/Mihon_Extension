@@ -97,6 +97,25 @@ fun isPaywalledTitle(title: String): Boolean {
 }
 
 /**
+ * Strips Wix CDN blur filters (e.g. blur_110) that cause HTTP 400 Bad Request decoder crashes or blurry images.
+ */
+fun cleanWixUrl(url: String): String {
+    var c = url
+        .replace(Regex(",?blur_\\d+"), "")
+        .replace(Regex("blur_\\d+,?"), "")
+        .replace(Regex(",+/"), "/")
+        .replace(Regex("/+,"), "/")
+        .replace(Regex(",+"), ",")
+    val proto = when {
+        c.startsWith("https://") -> "https://"
+        c.startsWith("http://") -> "http://"
+        else -> ""
+    }
+    val body = c.removePrefix(proto).replace(Regex("/+"), "/")
+    return proto + body
+}
+
+/**
  * Resolves high-resolution image URL from a DeviantArt media JSON object (including Wix CDN file.download tokens).
  */
 fun resolveMediaUrl(mediaObj: JsonObject): String? {
@@ -132,22 +151,25 @@ fun resolveMediaUrl(mediaObj: JsonObject): String? {
 
     if (targetType != null) {
         val s = targetType["s"]?.jsonPrimitive?.contentOrNull
-        if (!s.isNullOrBlank()) return s
+        if (!s.isNullOrBlank()) return cleanWixUrl(s)
         val c = targetType["c"]?.jsonPrimitive?.contentOrNull
         if (!c.isNullOrBlank()) {
-            val path = c.replace("<prettyName>", prettyName).replace("\u003CprettyName\u003E", prettyName)
+            val cleanC = cleanWixUrl(c)
+            val path = cleanC.replace("<prettyName>", prettyName).replace("\u003CprettyName\u003E", prettyName)
             val full = if (baseUri.endsWith("/") && path.startsWith("/")) {
                 baseUri + path.substring(1)
             } else {
                 baseUri + path
             }
             val tok = tokens.firstOrNull()
-            return if (tok != null && !full.contains("token=")) "$full?token=$tok" else full
+            val fullUrl = if (tok != null && !full.contains("token=")) "$full?token=$tok" else full
+            return cleanWixUrl(fullUrl)
         }
     }
 
     if (baseUri.startsWith("http")) {
-        return if (dlToken != null && !baseUri.contains("token=")) "$baseUri?token=$dlToken" else baseUri
+        val baseClean = cleanWixUrl(baseUri)
+        return if (dlToken != null && !baseClean.contains("token=")) "$baseClean?token=$dlToken" else baseClean
     }
 
     return null

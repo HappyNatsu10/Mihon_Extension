@@ -98,7 +98,7 @@ class DescriptionAndGalleryTest {
 
         val url = api.fullviewUrl(media, raiseQuality = true)
         assertEquals(
-            "https://images-wixmp.com/f/abc/xyz.jpg/v1/fill/w_1280,h_753,q_100,strp,blur_55/sample_art-fullview.jpg?token=jwt.token.here",
+            "https://images-wixmp.com/f/abc/xyz.jpg/v1/fill/w_1280,h_753,q_100,strp/sample_art-fullview.jpg?token=jwt.token.here",
             url,
         )
     }
@@ -509,5 +509,31 @@ class DescriptionAndGalleryTest {
         val filtered = mergeWithExisting(crawled, existing, sortById = false, hidePaywalled = true) { TestChapter() }
         assertEquals(1, filtered.size)
         assertEquals("/art/free-1", filtered[0].url)
+    }
+
+    @Test
+    fun testCleanWixUrlStripsBlur() {
+        val blurred1 = "https://images-wixmp.com/v1/fill/w_2560,h_1440,q_80,strp,blur_110/art-fullview.jpg"
+        assertEquals(
+            "https://images-wixmp.com/v1/fill/w_2560,h_1440,q_80,strp/art-fullview.jpg",
+            cleanWixUrl(blurred1),
+        )
+
+        val blurred2 = "https://images-wixmp.com/v1/fill/w_2560,h_1440,blur_55,q_80,strp/art-fullview.jpg"
+        assertEquals(
+            "https://images-wixmp.com/v1/fill/w_2560,h_1440,q_80,strp/art-fullview.jpg",
+            cleanWixUrl(blurred2),
+        )
+
+        val blurred3 = "/v1/fill/blur_55/art.jpg"
+        assertEquals("/v1/fill/art.jpg", cleanWixUrl(blurred3))
+    }
+
+    @Test
+    fun testExtractDeviationId() {
+        assertEquals("1336530164", DeviantArtApi.extractDeviationId("https://www.deviantart.com/sbdhcn/art/AI-TG-Animation%3A-Automated-Barbershop-1336530164"))
+        assertEquals("1294172614", DeviantArtApi.extractDeviationId("/art/Room-Service-%21-1294172614"))
+        assertEquals("99999", DeviantArtApi.extractDeviationId("https://www.deviantart.com/user/art/title-99999?query=1#hash"))
+        assertEquals("12345", DeviantArtApi.extractDeviationId("/deviation/12345"))
     }
 }
